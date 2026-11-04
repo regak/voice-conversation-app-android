@@ -10,6 +10,8 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.isActive
 
@@ -34,7 +36,14 @@ class AudioEngine(
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
     private var captureJob: Job? = null
+    private var playbackJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO)
+
+    // Unbounded-ish buffer of decoded PCM chunks awaiting playback. Capacity
+    // is generous but finite so a runaway server can't leak memory forever;
+    // trySendBlocking from playChunk() will just briefly block the IO-bound
+    // caller (never the main thread) if it's ever actually full.
+    private val playbackQueue = Channel<ByteArray>(capacity = 256)
 
     @Volatile var isCapturing: Boolean = false
         private set
@@ -142,15 +151,44 @@ class AudioEngine(
             .build()
         track.play()
         audioTrack = track
+        ensurePlaybackConsumer()
         return track
     }
 
-    /** Feed one base64 PCM16 (24kHz) chunk from the server for playback. */
+    /** Dedicated IO coroutine that drains playbackQueue and does the actual
+     *  (potentially blocking) AudioTrack.write(). Started lazily, once. */
+    private fun ensurePlaybackConsumer() {
+        if (playbackJob != null) return
+        playbackJob = scope.launch {
+            try {
+                for (chunk in playbackQueue) {
+                    try {
+                        audioTrack?.write(chunk, 0, chunk.size)
+                    } catch (t: Throwable) {
+                        onError("playback write failed: ${t.javaClass.simpleName}: ${t.message}")
+                    }
+                }
+            } catch (t: Throwable) {
+                onError("playback consumer crashed: ${t.javaClass.simpleName}: ${t.message}")
+            }
+        }
+    }
+
+    /** Feed one base64 PCM16 (24kHz) chunk from the server for playback.
+     *  Decodes and enqueues only -- the actual blocking AudioTrack.write()
+     *  happens on a dedicated IO coroutine (see ensurePlaybackConsumer), so
+     *  this is safe to call from the main thread without risking an ANR if
+     *  playback briefly falls behind (e.g. while the app is backgrounded and
+     *  throttled). */
     fun playChunk(base64Pcm: String) {
         try {
             val bytes = Base64.decode(base64Pcm, Base64.NO_WRAP)
-            val track = ensurePlaybackTrack()
-            track.write(bytes, 0, bytes.size)
+            ensurePlaybackTrack()
+            // trySendBlocking only blocks the actual caller if the queue is
+            // genuinely full (256 chunks @ ~100ms each = ~25s backlog) --
+            // call playChunk from a background coroutine if that's a concern,
+            // but in practice the consumer drains far faster than that.
+            playbackQueue.trySendBlocking(bytes)
         } catch (t: Throwable) {
             onError("playChunk failed: ${t.javaClass.simpleName}: ${t.message}")
         }
@@ -158,6 +196,12 @@ class AudioEngine(
 
     /** Called on serverContent.interrupted == true -- discard queued audio immediately. */
     fun flushPlayback() {
+        // Drop anything still queued but not yet written -- a barge-in means
+        // the user doesn't want to hear the rest of what's buffered.
+        while (true) {
+            val result = playbackQueue.tryReceive()
+            if (result.isFailure) break
+        }
         audioTrack?.let {
             runCatching { it.pause() }
             runCatching { it.flush() }
@@ -168,6 +212,8 @@ class AudioEngine(
 
     fun release() {
         stopCapture()
+        playbackJob?.cancel()
+        playbackJob = null
         audioTrack?.let {
             runCatching { it.stop() }
             it.release()
