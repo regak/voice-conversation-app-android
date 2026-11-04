@@ -42,7 +42,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class GeminiLiveClient(
     private val apiKey: String,
-    private val model: String = "models/gemini-2.0-flash-live-001",
+    private val model: String = "models/gemini-3.8-live",
 ) {
     companion object {
         private const val TAG = "GeminiLiveClient"
