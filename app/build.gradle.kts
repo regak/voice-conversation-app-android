@@ -74,7 +74,13 @@ dependencies {
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-    implementation("org.json:json:20240303")
+    // NOTE: deliberately NOT depending on org.json:json here. Android's
+    // bootclasspath provides its own stripped-down org.json implementation
+    // that wins at runtime regardless of what's on the compile classpath --
+    // compiling against the desktop org.json library let code call methods
+    // (e.g. JSONObject.put(String, Collection)) that don't exist on-device,
+    // causing a NoSuchMethodError at runtime despite a clean compile. Code
+    // must only use the methods available in Android's actual org.json.
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

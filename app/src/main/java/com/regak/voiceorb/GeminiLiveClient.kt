@@ -12,6 +12,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -109,7 +110,7 @@ class GeminiLiveClient(
             put("setup", JSONObject().apply {
                 put("model", model)
                 put("generationConfig", JSONObject().apply {
-                    put("responseModalities", listOf("AUDIO"))
+                    put("responseModalities", JSONArray(listOf("AUDIO")))
                 })
                 put("inputAudioTranscription", JSONObject())
                 put("outputAudioTranscription", JSONObject())
@@ -195,10 +196,10 @@ class GeminiLiveClient(
     fun sendToolResponse(functionId: String, response: JSONObject) {
         val msg = JSONObject().apply {
             put("toolResponse", JSONObject().apply {
-                put("functionResponses", listOf(JSONObject().apply {
+                put("functionResponses", JSONArray(listOf(JSONObject().apply {
                     put("id", functionId)
                     put("response", response)
-                }))
+                })))
             })
         }
         webSocket?.send(msg.toString())
