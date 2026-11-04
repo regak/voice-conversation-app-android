@@ -98,6 +98,16 @@ class GeminiLiveClient(
                 handleServerMessage(text)
             }
 
+            override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
+                // The Gemini Live API sends its JSON replies as BINARY frames,
+                // not text frames (confirmed via a standalone Python test where
+                // ws.recv() returned `bytes`, not `str`). OkHttp routes binary
+                // frames to this overload specifically -- missing it meant every
+                // server reply was silently dropped with zero error, which is
+                // exactly the "connects fine, never responds" symptom.
+                handleServerMessage(bytes.utf8())
+            }
+
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.e(TAG, "WebSocket failure", t)
                 val code = response?.code
