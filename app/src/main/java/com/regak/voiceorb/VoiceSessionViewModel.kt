@@ -80,6 +80,7 @@ class VoiceSessionViewModel : ViewModel() {
                         }
                         is GeminiLiveClient.Event.TranscriptDelta -> {
                             transcript.add(TranscriptLine(event.text, event.isModel))
+                            while (transcript.size > 500) transcript.removeAt(0)
                         }
                         is GeminiLiveClient.Event.Interrupted -> {
                             log("barge-in: interrupted by user, flushing playback")

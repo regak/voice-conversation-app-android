@@ -139,34 +139,61 @@ class GeminiLiveClient(
         emit(Event.RawServerMessage("ws.send(setup) returned $sent"))
     }
 
+    private var audioChunkLogCounter = 0
+
     private fun handleServerMessage(text: String) {
-        emit(Event.RawServerMessage(text))
-        val json = runCatching { JSONObject(text) }.getOrNull() ?: return
+        val json = runCatching { JSONObject(text) }.getOrNull()
+        if (json == null) {
+            emit(Event.RawServerMessage(text))
+            return
+        }
 
         if (json.has("setupComplete")) {
             setupAcked.set(true)
+            emit(Event.RawServerMessage(text))
             emit(Event.SetupComplete(text))
             flushPendingAudio()
             return
         }
 
         if (json.has("toolCall")) {
+            emit(Event.RawServerMessage(text))
             emit(Event.ToolCall(json.getJSONObject("toolCall")))
             return
         }
 
-        val serverContent = json.optJSONObject("serverContent") ?: return
+        val serverContent = json.optJSONObject("serverContent")
+        if (serverContent == null) {
+            emit(Event.RawServerMessage(text))
+            return
+        }
 
         if (serverContent.optBoolean("interrupted", false)) {
+            emit(Event.RawServerMessage(text))
             emit(Event.Interrupted(text))
         }
 
+        // Audio frames arrive many times per second during active speech --
+        // deliberately do NOT emit a RawServerMessage for every one of these
+        // (that was flooding the Compose debug panel with recompositions on
+        // the main thread and causing an ANR mid-conversation). Throttle to
+        // a periodic summary instead, same pattern as mic-capture logging.
+        var hadAudio = false
         serverContent.optJSONObject("modelTurn")?.optJSONArray("parts")?.let { parts ->
             for (i in 0 until parts.length()) {
                 val part = parts.getJSONObject(i)
                 part.optJSONObject("inlineData")?.optString("data")?.let { b64 ->
-                    if (b64.isNotEmpty()) emit(Event.AudioChunk(b64))
+                    if (b64.isNotEmpty()) {
+                        hadAudio = true
+                        emit(Event.AudioChunk(b64))
+                    }
                 }
+            }
+        }
+        if (hadAudio) {
+            audioChunkLogCounter++
+            if (audioChunkLogCounter % 20 == 0) {
+                emit(Event.RawServerMessage("[throttled] received $audioChunkLogCounter audio chunks so far"))
             }
         }
 
@@ -178,6 +205,7 @@ class GeminiLiveClient(
         }
 
         if (serverContent.optBoolean("turnComplete", false)) {
+            emit(Event.RawServerMessage(text))
             emit(Event.TurnComplete(text))
         }
     }
