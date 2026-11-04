@@ -74,6 +74,7 @@ class GeminiLiveClient(
 
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS) // streaming socket, no read timeout
+        .pingInterval(20, TimeUnit.SECONDS) // keep idle sockets alive through NATs/proxies
         .build()
 
     fun connect() {
@@ -85,8 +86,12 @@ class GeminiLiveClient(
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.i(TAG, "WebSocket opened")
-                emit(Event.Connected("open"))
-                sendSetupMessage(webSocket)
+                emit(Event.Connected("open, httpCode=${response.code}"))
+                try {
+                    sendSetupMessage(webSocket)
+                } catch (t: Throwable) {
+                    emit(Event.Failure("sendSetupMessage threw: ${t.javaClass.simpleName}: ${t.message}"))
+                }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -95,7 +100,9 @@ class GeminiLiveClient(
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.e(TAG, "WebSocket failure", t)
-                emit(Event.Failure(t.message ?: "unknown failure"))
+                val code = response?.code
+                val body = runCatching { response?.body?.string() }.getOrNull()
+                emit(Event.Failure("${t.javaClass.simpleName}: ${t.message} httpCode=$code body=$body"))
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
@@ -116,7 +123,10 @@ class GeminiLiveClient(
                 put("outputAudioTranscription", JSONObject())
             })
         }
-        ws.send(setup.toString())
+        val payload = setup.toString()
+        emit(Event.RawServerMessage("SENDING setup: $payload"))
+        val sent = ws.send(payload)
+        emit(Event.RawServerMessage("ws.send(setup) returned $sent"))
     }
 
     private fun handleServerMessage(text: String) {
