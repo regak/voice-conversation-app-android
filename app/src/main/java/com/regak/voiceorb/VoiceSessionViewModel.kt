@@ -24,6 +24,12 @@ class VoiceSessionViewModel : ViewModel() {
 
     private var client: GeminiLiveClient? = null
     private var audioEngine: AudioEngine? = null
+    @Volatile private var muted: Boolean = false
+
+    fun setMuted(value: Boolean) {
+        muted = value
+        log(if (value) "mic muted by user" else "mic unmuted by user")
+    }
 
     private fun log(msg: String) {
         debugLog.add(msg)
@@ -47,7 +53,7 @@ class VoiceSessionViewModel : ViewModel() {
         lastError.value = null
 
         val engine = AudioEngine(
-            onChunkCaptured = { b64 -> client?.sendAudioChunk(b64) },
+            onChunkCaptured = { b64 -> if (!muted) client?.sendAudioChunk(b64) },
             onLog = { log("audio: $it") },
             onError = {
                 log("AUDIO ERROR: $it")
