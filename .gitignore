@@ -4,3 +4,4 @@ local.properties
 *.apk
 .idea/
 .DS_Store
+build_output.log
