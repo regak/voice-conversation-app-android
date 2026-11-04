@@ -1,14 +1,21 @@
 package com.regak.voiceorb
 
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.launch
 
 enum class OrbState { IDLE, LISTENING, SPEAKING, CONNECTING, ERROR }
 
-data class TranscriptLine(val text: String, val isModel: Boolean)
+/** One message bubble in the conversation. `text` is mutable so consecutive
+ *  deltas for the SAME turn append into the same bubble (observed in place
+ *  by Compose) instead of each delta becoming its own fragment line. */
+class TranscriptLine(val isModel: Boolean) {
+    var text: String by mutableStateOf("")
+}
 
 /**
  * Owns the GeminiLiveClient + AudioEngine lifecycle and exposes
@@ -25,6 +32,7 @@ class VoiceSessionViewModel : ViewModel() {
     private var client: GeminiLiveClient? = null
     private var audioEngine: AudioEngine? = null
     @Volatile private var muted: Boolean = false
+    private var openTranscriptLine: TranscriptLine? = null
 
     fun setMuted(value: Boolean) {
         muted = value
@@ -41,6 +49,30 @@ class VoiceSessionViewModel : ViewModel() {
         log("ERROR: $msg")
         lastError.value = msg
         orbState.value = OrbState.ERROR
+    }
+
+    /** Appends a transcript delta into the currently-open bubble for that
+     *  speaker, or starts a new bubble if the speaker changed (or none is
+     *  open yet). This is what makes consecutive deltas read as one
+     *  continuous sentence/message instead of fragmented lines. */
+    private fun appendTranscriptDelta(text: String, isModel: Boolean) {
+        val current = openTranscriptLine
+        if (current != null && current.isModel == isModel) {
+            current.text += text
+        } else {
+            val line = TranscriptLine(isModel)
+            line.text = text
+            transcript.add(line)
+            openTranscriptLine = line
+            while (transcript.size > 200) transcript.removeAt(0)
+        }
+    }
+
+    /** Closes the currently-open bubble so the NEXT delta (even from the
+     *  same speaker) starts a fresh message -- called at natural turn
+     *  boundaries (model finished speaking, or a barge-in interrupted it). */
+    private fun closeOpenTranscriptLine() {
+        openTranscriptLine = null
     }
 
     fun start(apiKeyValue: String) {
@@ -85,15 +117,16 @@ class VoiceSessionViewModel : ViewModel() {
                             engine.playChunk(event.pcm16Base64)
                         }
                         is GeminiLiveClient.Event.TranscriptDelta -> {
-                            transcript.add(TranscriptLine(event.text, event.isModel))
-                            while (transcript.size > 500) transcript.removeAt(0)
+                            appendTranscriptDelta(event.text, event.isModel)
                         }
                         is GeminiLiveClient.Event.Interrupted -> {
                             log("barge-in: interrupted by user, flushing playback")
                             engine.flushPlayback()
+                            closeOpenTranscriptLine()
                             orbState.value = OrbState.LISTENING
                         }
                         is GeminiLiveClient.Event.TurnComplete -> {
+                            closeOpenTranscriptLine()
                             orbState.value = OrbState.LISTENING
                         }
                         is GeminiLiveClient.Event.ToolCall -> {
@@ -131,6 +164,7 @@ class VoiceSessionViewModel : ViewModel() {
         runCatching { client?.close() }
         audioEngine = null
         client = null
+        openTranscriptLine = null
         orbState.value = OrbState.IDLE
     }
 

@@ -21,6 +21,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -138,8 +139,6 @@ fun VoiceOrbScreen(
     var showInfoBanner by remember { mutableStateOf(true) }
 
     val sessionActive = orbState != OrbState.IDLE && orbState != OrbState.ERROR
-    val lastUser = viewModel.transcript.lastOrNull { !it.isModel }
-    val lastModel = viewModel.transcript.lastOrNull { it.isModel }
 
     Box(
         modifier = Modifier
@@ -158,36 +157,54 @@ fun VoiceOrbScreen(
                 RoundIconButton(icon = Icons.Filled.Tune, onClick = { showDebug = !showDebug })
             }
 
-            // Last exchange shown as chat bubbles above the orb, ChatGPT style.
-            Column(
+            // Full scrollable conversation history, ChatGPT-conversation-mode
+            // style (both sides retained, not just the last exchange).
+            val listState = rememberLazyListState()
+            LaunchedEffect(viewModel.transcript.size) {
+                if (viewModel.transcript.isNotEmpty()) {
+                    listState.animateScrollToItem(viewModel.transcript.size - 1)
+                }
+            }
+            LazyColumn(
+                state = listState,
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
                     .padding(horizontal = 20.dp),
             ) {
-                lastUser?.let { line ->
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.End)
-                            .padding(top = 8.dp)
-                            .clip(RoundedCornerShape(18.dp))
-                            .background(Color(0xFFDCE7FB))
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
-                    ) {
-                        Text(text = line.text, color = Color(0xFF1A1A1A), fontSize = 16.sp)
-                    }
-                }
-                lastModel?.let { line ->
-                    Column(modifier = Modifier.padding(top = 12.dp)) {
-                        Text(text = line.text, color = Color(0xFF1A1A1A), fontSize = 16.sp)
-                        Row(
-                            modifier = Modifier.padding(top = 8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                items(viewModel.transcript) { line ->
+                    val isLastModelLine = line.isModel &&
+                        viewModel.transcript.lastOrNull { it.isModel } === line
+                    if (line.isModel) {
+                        Column(modifier = Modifier.padding(top = 12.dp, bottom = 4.dp)) {
+                            Text(text = line.text, color = Color(0xFF1A1A1A), fontSize = 16.sp)
+                            if (isLastModelLine) {
+                                Row(
+                                    modifier = Modifier.padding(top = 8.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                ) {
+                                    Icon(Icons.Filled.ContentCopy, contentDescription = "Copy", tint = Color(0xFF8A8F98), modifier = Modifier.size(18.dp))
+                                    Icon(Icons.Filled.ThumbUp, contentDescription = "Good response", tint = Color(0xFF8A8F98), modifier = Modifier.size(18.dp))
+                                    Icon(Icons.Filled.ThumbDown, contentDescription = "Bad response", tint = Color(0xFF8A8F98), modifier = Modifier.size(18.dp))
+                                    Icon(Icons.Filled.Share, contentDescription = "Share", tint = Color(0xFF8A8F98), modifier = Modifier.size(18.dp))
+                                }
+                            }
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 8.dp, bottom = 4.dp),
+                            contentAlignment = Alignment.CenterEnd,
                         ) {
-                            Icon(Icons.Filled.ContentCopy, contentDescription = "Copy", tint = Color(0xFF8A8F98), modifier = Modifier.size(18.dp))
-                            Icon(Icons.Filled.ThumbUp, contentDescription = "Good response", tint = Color(0xFF8A8F98), modifier = Modifier.size(18.dp))
-                            Icon(Icons.Filled.ThumbDown, contentDescription = "Bad response", tint = Color(0xFF8A8F98), modifier = Modifier.size(18.dp))
-                            Icon(Icons.Filled.Share, contentDescription = "Share", tint = Color(0xFF8A8F98), modifier = Modifier.size(18.dp))
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(18.dp))
+                                    .background(Color(0xFFDCE7FB))
+                                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                            ) {
+                                Text(text = line.text, color = Color(0xFF1A1A1A), fontSize = 16.sp)
+                            }
                         }
                     }
                 }
