@@ -22,6 +22,7 @@ import kotlinx.coroutines.isActive
 class AudioEngine(
     private val onChunkCaptured: (base64: String) -> Unit,
     private val onLog: (String) -> Unit = {},
+    private val onError: (String) -> Unit = {},
 ) {
     companion object {
         private const val TAG = "AudioEngine"
@@ -40,45 +41,66 @@ class AudioEngine(
 
     fun startCapture() {
         if (isCapturing) return
-        val minBuf = AudioRecord.getMinBufferSize(
-            INPUT_SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-        )
-        val bufferSize = maxOf(minBuf, INPUT_SAMPLE_RATE * 2 * CHUNK_MS / 1000 * 4)
+        try {
+            val minBuf = AudioRecord.getMinBufferSize(
+                INPUT_SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+            )
+            if (minBuf <= 0) {
+                onError("AudioRecord.getMinBufferSize returned $minBuf -- device/sample rate unsupported")
+                return
+            }
+            val bufferSize = maxOf(minBuf, INPUT_SAMPLE_RATE * 2 * CHUNK_MS / 1000 * 4)
 
-        val record = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-            INPUT_SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-            bufferSize,
-        )
-        if (record.state != AudioRecord.STATE_INITIALIZED) {
-            onLog("AudioRecord failed to initialize")
-            return
-        }
-        audioRecord = record
-        isCapturing = true
-        record.startRecording()
-        onLog("capture started, bufferSize=$bufferSize")
+            val record = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                INPUT_SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufferSize,
+            )
+            if (record.state != AudioRecord.STATE_INITIALIZED) {
+                record.release()
+                onError("AudioRecord failed to initialize (state=${record.state})")
+                return
+            }
+            audioRecord = record
+            isCapturing = true
+            record.startRecording()
+            if (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                onError("AudioRecord.startRecording() did not enter RECORDING state")
+                isCapturing = false
+                record.release()
+                audioRecord = null
+                return
+            }
+            onLog("capture started, bufferSize=$bufferSize")
 
-        val chunkSamples = INPUT_SAMPLE_RATE * CHUNK_MS / 1000
-        val chunkBytes = ByteArray(chunkSamples * 2) // 16-bit = 2 bytes/sample
-        var chunkCount = 0
+            val chunkSamples = INPUT_SAMPLE_RATE * CHUNK_MS / 1000
+            val chunkBytes = ByteArray(chunkSamples * 2) // 16-bit = 2 bytes/sample
+            var chunkCount = 0
 
-        captureJob = scope.launch {
-            while (isActive && isCapturing) {
-                val read = record.read(chunkBytes, 0, chunkBytes.size)
-                if (read > 0) {
-                    val b64 = Base64.encodeToString(chunkBytes, 0, read, Base64.NO_WRAP)
-                    onChunkCaptured(b64)
-                    chunkCount++
-                    if (chunkCount % 20 == 0) onLog("captured $chunkCount chunks")
-                } else if (read < 0) {
-                    onLog("AudioRecord.read error code=$read")
+            captureJob = scope.launch {
+                try {
+                    while (isActive && isCapturing) {
+                        val read = record.read(chunkBytes, 0, chunkBytes.size)
+                        if (read > 0) {
+                            val b64 = Base64.encodeToString(chunkBytes, 0, read, Base64.NO_WRAP)
+                            onChunkCaptured(b64)
+                            chunkCount++
+                            if (chunkCount % 20 == 0) onLog("captured $chunkCount chunks")
+                        } else if (read < 0) {
+                            onLog("AudioRecord.read error code=$read")
+                        }
+                    }
+                } catch (t: Throwable) {
+                    onError("capture loop crashed: ${t.javaClass.simpleName}: ${t.message}")
                 }
             }
+        } catch (t: Throwable) {
+            isCapturing = false
+            onError("startCapture() failed: ${t.javaClass.simpleName}: ${t.message}")
         }
     }
 
@@ -125,9 +147,13 @@ class AudioEngine(
 
     /** Feed one base64 PCM16 (24kHz) chunk from the server for playback. */
     fun playChunk(base64Pcm: String) {
-        val bytes = Base64.decode(base64Pcm, Base64.NO_WRAP)
-        val track = ensurePlaybackTrack()
-        track.write(bytes, 0, bytes.size)
+        try {
+            val bytes = Base64.decode(base64Pcm, Base64.NO_WRAP)
+            val track = ensurePlaybackTrack()
+            track.write(bytes, 0, bytes.size)
+        } catch (t: Throwable) {
+            onError("playChunk failed: ${t.javaClass.simpleName}: ${t.message}")
+        }
     }
 
     /** Called on serverContent.interrupted == true -- discard queued audio immediately. */

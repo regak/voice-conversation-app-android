@@ -45,6 +45,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        installCrashHandler()
+        val previousCrash = readAndClearLastCrash()
+
         setContent {
             VoiceOrbTheme {
                 VoiceOrbScreen(
@@ -54,6 +57,38 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+
+        if (previousCrash != null) {
+            // There is no ADB/logcat access to this device, so this is the
+            // only way to see what the LAST run actually crashed with.
+            viewModel.lastError.value = "Previous run crashed:\n$previousCrash"
+            viewModel.orbState.value = OrbState.ERROR
+        }
+    }
+
+    /** Writes any uncaught exception to a file so it survives the process death
+     *  and can be shown on the NEXT app launch -- there is no ADB/logcat
+     *  access to this test device. */
+    private fun installCrashHandler() {
+        val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            try {
+                val sw = java.io.StringWriter()
+                throwable.printStackTrace(java.io.PrintWriter(sw))
+                java.io.File(filesDir, "last_crash.txt").writeText(sw.toString())
+            } catch (_: Throwable) {
+                // best effort -- never let the crash handler itself crash
+            }
+            previousHandler?.uncaughtException(thread, throwable)
+        }
+    }
+
+    private fun readAndClearLastCrash(): String? {
+        val f = java.io.File(filesDir, "last_crash.txt")
+        if (!f.exists()) return null
+        val text = runCatching { f.readText() }.getOrNull()
+        f.delete()
+        return text
     }
 
     private fun startWithPermissionCheck() {
