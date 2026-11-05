@@ -389,6 +389,13 @@ class VoiceSessionService : Service() {
     // deliberate stop/start, so the model keeps full context instead of
     // "forgetting everything" the way a brand-new session would.
     private var lastResumeHandle: String? = null
+    // Which saved session the LIVE transcript/connection actually belongs to
+    // right now. Deliberately NOT read from SessionManager.getCurrentId()
+    // when persisting -- that's a UI-owned pointer the drawer flips the
+    // instant the user taps a different session, often before this
+    // service has finished flushing the OLD session's final turn. Using
+    // our own tracked id as the save target removes that race entirely.
+    private var activeSessionId: String? = null
     private val serviceScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
 
     override fun onCreate() {
@@ -397,6 +404,7 @@ class VoiceSessionService : Service() {
         // Load the currently-selected session (or create a new one if none exists).
         val session = SessionManager.getCurrent(applicationContext)
             ?: SessionManager.newSession(applicationContext)
+        activeSessionId = session.id
         lastResumeHandle = session.resumeHandle
         if (transcript.isEmpty() && session.transcript.isNotEmpty()) {
             session.transcript.forEach { (isModel, text) ->
@@ -431,6 +439,27 @@ class VoiceSessionService : Service() {
             // that race entirely and guarantees startForeground() is (re)called
             // well within the 5s window.
             ACTION_SWITCH_SESSION -> {
+                // Flush the OUTGOING session's live transcript to its own
+                // disk record FIRST, explicitly by the id we know it
+                // actually belongs to -- before touching anything else.
+                // This is what was silently failing before: relying on
+                // closeOpenTranscriptLine()'s use of the shared "current
+                // session id" meant a switch away before a turn fully
+                // closed (or any async race with the UI already flipping
+                // the current-id pointer) left the outgoing session's
+                // record stale/empty on disk, so switching back later
+                // loaded nothing -- even though a full app restart (which
+                // re-reads via a different path) could still show it if
+                // an earlier turn happened to save correctly.
+                val outgoingId = activeSessionId
+                if (outgoingId != null) {
+                    SessionManager.loadAll(applicationContext).firstOrNull { it.id == outgoingId }?.let { outgoing ->
+                        SessionManager.updateSession(
+                            applicationContext,
+                            outgoing.copy(transcript = transcript.map { it.isModel to it.text }),
+                        )
+                    }
+                }
                 stopSession()
                 val sessionId = intent.getStringExtra(EXTRA_SESSION_ID)
                 val session = if (sessionId != null) {
@@ -438,6 +467,7 @@ class VoiceSessionService : Service() {
                 } else {
                     null
                 }
+                activeSessionId = session?.id ?: sessionId
                 transcript.clear()
                 session?.transcript?.forEach { (isModel, text) ->
                     transcript.add(TranscriptLine(isModel).apply { this.text = text })
@@ -489,9 +519,9 @@ class VoiceSessionService : Service() {
 
     private fun closeOpenTranscriptLine() {
         openTranscriptLine = null
-        // Persist to the current session
-        val currentId = SessionManager.getCurrentId(applicationContext)
-        currentId?.let { id ->
+        // Persist to the session this live transcript actually belongs to
+        // (NOT SessionManager.getCurrentId() -- see activeSessionId's doc).
+        activeSessionId?.let { id ->
             SessionManager.loadAll(applicationContext).firstOrNull { it.id == id }?.let { session ->
                 val updated = session.copy(transcript = transcript.map { it.isModel to it.text })
                 SessionManager.updateSession(applicationContext, updated)
@@ -726,9 +756,9 @@ class VoiceSessionService : Service() {
                         is GeminiLiveClient.Event.SessionResumptionUpdate -> {
                             if (event.resumable) {
                                 lastResumeHandle = event.handle
-                                // Persist to the current session
-                                val currentId = SessionManager.getCurrentId(applicationContext)
-                                currentId?.let { id ->
+                                // Persist to the session this connection
+                                // actually belongs to (see activeSessionId).
+                                activeSessionId?.let { id ->
                                     SessionManager.loadAll(applicationContext).firstOrNull { it.id == id }?.let { session ->
                                         val updated = session.copy(resumeHandle = event.handle)
                                         SessionManager.updateSession(applicationContext, updated)

@@ -20,8 +20,8 @@ android {
         applicationId = "com.regak.voiceorb"
         minSdk = 24
         targetSdk = 34
-        versionCode = 27
-        versionName = "0.25.1"
+        versionCode = 28
+        versionName = "0.25.2"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
