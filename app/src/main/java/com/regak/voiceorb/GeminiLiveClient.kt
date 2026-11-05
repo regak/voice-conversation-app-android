@@ -190,7 +190,13 @@ class GeminiLiveClient(
                                     "in the YouTube app. Pass the user's request as a " +
                                     "natural search query (e.g. 'Dune Part Two official " +
                                     "trailer', 'lo-fi study music') -- do not try to guess " +
-                                    "a video URL or ID yourself.",
+                                    "a video URL or ID yourself. IMPORTANT: the tool response " +
+                                    "includes ground-truth 'is_actually_live_now' and " +
+                                    "'published_at' fields -- always base what you tell the " +
+                                    "user on THOSE fields, never assume the video is live or " +
+                                    "'today's' just because that's what was asked for; if " +
+                                    "is_actually_live_now is false, say so plainly and mention " +
+                                    "the real publish date instead of claiming it's live/today.",
                             )
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")

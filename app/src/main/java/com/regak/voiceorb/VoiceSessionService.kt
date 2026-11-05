@@ -597,27 +597,44 @@ class VoiceSessionService : Service() {
         if (query.isBlank()) {
             return org.json.JSONObject().apply { put("error", "query was missing or blank") }
         }
-        val isLive = args.optBoolean("is_live", false)
+        // Don't rely solely on the model's is_live flag -- confirmed via real
+        // testing that it's inconsistent across phrasings/follow-ups/language
+        // (a Swahili or rephrased follow-up like "today's video" didn't set
+        // it, silently falling back to a plain keyword search that picked an
+        // old unrelated video). Back it up with local keyword detection on
+        // the query text itself, in English and Swahili.
+        val modelSaysLive = args.optBoolean("is_live", false)
+        val liveKeywords = listOf(
+            "live", "livestream", "live stream", "right now", "happening now",
+            "leo", "sasa", "sasa hivi", "moja kwa moja", // Swahili: today/now/now-now/live(lit. "direct")
+        )
+        val queryLooksLive = liveKeywords.any { query.contains(it, ignoreCase = true) }
+        val isLive = modelSaysLive || queryLooksLive
+
         val apiKey = BuildConfig.YOUTUBE_API_KEY
         if (apiKey.isBlank()) {
             return org.json.JSONObject().apply { put("error", "No YouTube API key configured") }
         }
 
-        val searchResult = runCatching { searchYoutube(query, apiKey, isLive) }.getOrElse { t ->
+        var searchResult = runCatching { searchYoutube(query, apiKey, isLive) }.getOrElse { t ->
             log("YouTube search failed: ${t.javaClass.simpleName}: ${t.message}")
             return org.json.JSONObject().apply { put("error", "YouTube search failed: ${t.message}") }
         }
-        if (searchResult == null) {
-            val msg = if (isLive) {
-                "No live stream currently found for '$query'. Try again without " +
-                    "requiring live, in case it's not actually live right now."
-            } else {
-                "No YouTube results found for '$query'"
-            }
-            return org.json.JSONObject().apply { put("error", msg) }
+        // If a live-only search comes up empty (nothing is live right now),
+        // fall back to a plain search so the user still gets the most
+        // relevant/recent video instead of a dead end -- but the response
+        // below is honest about it NOT being live, so the model doesn't
+        // claim something false.
+        var fellBackFromLive = false
+        if (searchResult == null && isLive) {
+            searchResult = runCatching { searchYoutube(query, apiKey, live = false) }.getOrNull()
+            fellBackFromLive = searchResult != null
         }
-        val (videoId, title) = searchResult
-        val videoUrl = "https://www.youtube.com/watch?v=$videoId"
+        if (searchResult == null) {
+            return org.json.JSONObject().apply { put("error", "No YouTube results found for '$query'") }
+        }
+        val video = searchResult
+        val videoUrl = "https://www.youtube.com/watch?v=${video.videoId}"
 
         return try {
             val relayIntent = Intent(this, MainActivity::class.java).apply {
@@ -626,20 +643,40 @@ class VoiceSessionService : Service() {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             startActivity(relayIntent)
-            postVideoReadyNotification(videoUrl, title)
+            postVideoReadyNotification(videoUrl, video.title)
 
-            log("playing real search result '$title' ($videoId) for query '$query'")
+            log(
+                "playing real search result '${video.title}' (${video.videoId}) for query " +
+                    "'$query' isLive=${video.isLive} publishedAt=${video.publishedAt} " +
+                    "fellBackFromLive=$fellBackFromLive",
+            )
             org.json.JSONObject().apply {
                 put("result", "opened")
                 put("video_url", videoUrl)
-                put("title", title)
-                put(
-                    "note",
-                    "A 'Tap to play' notification was also posted as a backup -- " +
-                        "mention it briefly in case the app couldn't switch to " +
-                        "YouTube automatically (e.g. the user is currently inside " +
-                        "another app).",
-                )
+                put("title", video.title)
+                // Ground-truth fields from the actual YouTube API response --
+                // ALWAYS speak from these, never assume "today" or "live"
+                // just because that's what was asked for. The requested
+                // video may not actually be live or from today.
+                put("is_actually_live_now", video.isLive)
+                put("published_at", video.publishedAt ?: org.json.JSONObject.NULL)
+                if (isLive && fellBackFromLive) {
+                    put(
+                        "note",
+                        "Nothing is live right now for this query -- this is the most " +
+                            "relevant non-live video instead. Tell the user it is NOT " +
+                            "currently live, and mention its actual publish date above " +
+                            "rather than claiming it's today's broadcast.",
+                    )
+                } else {
+                    put(
+                        "note",
+                        "A 'Tap to play' notification was also posted as a backup -- " +
+                            "mention it briefly in case the app couldn't switch to " +
+                            "YouTube automatically (e.g. the user is currently inside " +
+                            "another app).",
+                    )
+                }
             }
         } catch (t: Throwable) {
             log("play_youtube failed: ${t.javaClass.simpleName}: ${t.message}")
@@ -649,12 +686,13 @@ class VoiceSessionService : Service() {
 
     private val httpClient = okhttp3.OkHttpClient()
 
-    /** Real YouTube Data API v3 search -- returns (videoId, title) of the
-     *  best matching result, or null if nothing matched. Runs on
-     *  Dispatchers.IO (blocking call), never the main thread.
+    /** Real YouTube Data API v3 search -- returns the best matching result
+     *  (with ground-truth live/publish metadata), or null if nothing
+     *  matched. Runs on Dispatchers.IO (blocking call), never the main
+     *  thread.
      *
-     *  Two real bugs this fixes vs. the original maxResults=1 version,
-     *  both confirmed directly against the live YouTube Data API:
+     *  Real bugs this fixes vs. the original maxResults=1 version, all
+     *  confirmed directly against the live YouTube Data API:
      *  1. The API can return a CHANNEL result ("kind": "youtube#channel")
      *     ranked #1 even with type=video set (a known API quirk, not
      *     something we can prevent via query params) -- picking a plain
@@ -663,9 +701,19 @@ class VoiceSessionService : Service() {
      *     actual "youtube#video" kind.
      *  2. "is it live right now" requests need eventType=live passed to
      *     the API -- a plain keyword search ranks by general relevance
-     *     and can easily miss an actively-live broadcast whose title
-     *     doesn't happen to rank it first. */
-    private fun searchYoutube(query: String, key: String, live: Boolean): Pair<String, String>? {
+     *     and can easily return an old, unrelated video (confirmed: a
+     *     plain search for a church's live service returned a stale
+     *     video from months earlier). Returning the real
+     *     liveBroadcastContent/publishedAt lets the caller speak
+     *     accurately about what was actually opened instead of assuming. */
+    private data class YoutubeResult(
+        val videoId: String,
+        val title: String,
+        val isLive: Boolean,
+        val publishedAt: String?,
+    )
+
+    private fun searchYoutube(query: String, key: String, live: Boolean): YoutubeResult? {
         val urlBuilder = "https://www.googleapis.com/youtube/v3/search".toHttpUrl().newBuilder()
             .addQueryParameter("part", "snippet")
             .addQueryParameter("q", query)
@@ -690,8 +738,11 @@ class VoiceSessionService : Service() {
                 if (idObj.optString("kind") != "youtube#video") continue // skip channel/playlist results
                 val videoId = idObj.optString("videoId")
                 if (videoId.isBlank()) continue
-                val title = item.getJSONObject("snippet").optString("title")
-                return videoId to title
+                val snippet = item.getJSONObject("snippet")
+                val title = snippet.optString("title")
+                val liveStatus = snippet.optString("liveBroadcastContent")
+                val publishedAt = snippet.optString("publishedAt").takeIf { it.isNotBlank() }
+                return YoutubeResult(videoId, title, isLive = liveStatus == "live", publishedAt = publishedAt)
             }
             return null
         }
