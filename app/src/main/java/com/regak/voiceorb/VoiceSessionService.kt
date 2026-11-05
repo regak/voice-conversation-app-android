@@ -143,6 +143,198 @@ class VoiceSessionService : Service() {
                 org.json.JSONObject().apply { put("error", "Failed to send WhatsApp reply: ${t.message}") }
             }
         }
+
+        // --- SMS: real-time announce + reply, and historical queries ---
+
+        /** Most recent still-repliable SMS senders, keyed by phone number,
+         *  newest last. Mirrors WhatsAppNotificationListener.pendingReplies
+         *  but SMS replies don't need a captured PendingIntent -- just the
+         *  number, since SmsManager.sendTextMessage() sends directly. */
+        data class PendingSmsSender(val senderName: String, val phoneNumber: String)
+        private val pendingSmsSenders = linkedMapOf<String, PendingSmsSender>()
+
+        /** Called by SmsReceiver for every new SMS while driving mode is
+         *  on. Same announce-into-the-live-session flow as WhatsApp. */
+        fun onSmsMessage(context: android.content.Context, senderName: String, phoneNumber: String, messageText: String) {
+            if (!drivingMode.value) return
+            synchronized(pendingSmsSenders) {
+                pendingSmsSenders[phoneNumber] = PendingSmsSender(senderName, phoneNumber)
+                while (pendingSmsSenders.size > 10) {
+                    pendingSmsSenders.remove(pendingSmsSenders.keys.first())
+                }
+            }
+            val notice = "[SYSTEM NOTICE -- not something the user said. A new SMS " +
+                "just arrived while the user is driving. Tell the user about it " +
+                "naturally and briefly, then ask if they want to reply.] New SMS " +
+                "from $senderName: \"$messageText\""
+            synchronized(pendingAnnouncements) { pendingAnnouncements.add(notice) }
+
+            val startIntent = Intent(context, VoiceSessionService::class.java).apply {
+                action = ACTION_START
+                putExtra(EXTRA_API_KEY, BuildConfig.GEMINI_API_KEY)
+            }
+            androidx.core.content.ContextCompat.startForegroundService(context, startIntent)
+            flushPendingAnnouncements()
+        }
+
+        /** Sends a real SMS reply via SmsManager -- a direct send call,
+         *  simpler and more robust than WhatsApp's RemoteInput dance since
+         *  nothing here can go stale. Matches the sender by name/number
+         *  hint if given, else the most recent one. */
+        fun sendSmsReply(context: android.content.Context, message: String, recipientHint: String): org.json.JSONObject {
+            if (message.isBlank()) {
+                return org.json.JSONObject().apply { put("error", "message was missing or blank") }
+            }
+            val entry = synchronized(pendingSmsSenders) {
+                if (recipientHint.isNotBlank()) {
+                    pendingSmsSenders.entries.lastOrNull {
+                        it.value.senderName.contains(recipientHint, ignoreCase = true) ||
+                            it.value.phoneNumber.contains(recipientHint)
+                    }
+                } else {
+                    pendingSmsSenders.entries.lastOrNull()
+                }
+            } ?: return org.json.JSONObject().apply { put("error", "No pending SMS conversation to reply to") }
+
+            return try {
+                val smsManager = if (android.os.Build.VERSION.SDK_INT >= 31) {
+                    context.getSystemService(android.telephony.SmsManager::class.java)
+                } else {
+                    @Suppress("DEPRECATION") android.telephony.SmsManager.getDefault()
+                }
+                smsManager.sendTextMessage(entry.value.phoneNumber, null, message, null, null)
+                synchronized(pendingSmsSenders) { pendingSmsSenders.remove(entry.key) }
+                org.json.JSONObject().apply {
+                    put("result", "sent")
+                    put("to", entry.value.senderName)
+                }
+            } catch (t: Throwable) {
+                org.json.JSONObject().apply { put("error", "Failed to send SMS reply: ${t.message}") }
+            }
+        }
+
+        /** Queries the real on-device SMS history (content://sms), not
+         *  just new arrivals -- for "read my messages from Mom today" /
+         *  "any unread SMS?" style requests. contactHint is resolved
+         *  against Contacts to the matching phone number(s) when given;
+         *  timeRange is one of "today"/"yesterday"/"this_week"/"all". */
+        fun querySms(
+            context: android.content.Context,
+            contactHint: String,
+            timeRange: String,
+            unreadOnly: Boolean,
+        ): org.json.JSONObject {
+            val selectionParts = mutableListOf<String>()
+            val selectionArgs = mutableListOf<String>()
+
+            if (contactHint.isNotBlank()) {
+                val numbers = resolveContactNumbers(context, contactHint)
+                if (numbers.isEmpty()) {
+                    return org.json.JSONObject().apply {
+                        put("error", "No contact found matching '$contactHint'")
+                    }
+                }
+                selectionParts.add("(${numbers.joinToString(" OR ") { "${android.provider.Telephony.Sms.ADDRESS} = ?" }})")
+                selectionArgs.addAll(numbers)
+            }
+
+            val dayMs = 24L * 60 * 60 * 1000
+            val cal = java.util.Calendar.getInstance()
+            cal.set(java.util.Calendar.HOUR_OF_DAY, 0); cal.set(java.util.Calendar.MINUTE, 0)
+            cal.set(java.util.Calendar.SECOND, 0); cal.set(java.util.Calendar.MILLISECOND, 0)
+            val todayStart = cal.timeInMillis
+            when (timeRange.lowercase()) {
+                "today" -> {
+                    selectionParts.add("${android.provider.Telephony.Sms.DATE} >= ?")
+                    selectionArgs.add(todayStart.toString())
+                }
+                "yesterday" -> {
+                    selectionParts.add("${android.provider.Telephony.Sms.DATE} >= ? AND ${android.provider.Telephony.Sms.DATE} < ?")
+                    selectionArgs.add((todayStart - dayMs).toString())
+                    selectionArgs.add(todayStart.toString())
+                }
+                "this_week" -> {
+                    selectionParts.add("${android.provider.Telephony.Sms.DATE} >= ?")
+                    selectionArgs.add((todayStart - 7 * dayMs).toString())
+                }
+                // "all" or anything else -- no date filter.
+            }
+
+            if (unreadOnly) {
+                selectionParts.add("${android.provider.Telephony.Sms.READ} = 0")
+                selectionParts.add("${android.provider.Telephony.Sms.TYPE} = ${android.provider.Telephony.Sms.MESSAGE_TYPE_INBOX}")
+            }
+
+            val selection = if (selectionParts.isEmpty()) null else selectionParts.joinToString(" AND ")
+            val results = org.json.JSONArray()
+            try {
+                context.contentResolver.query(
+                    android.provider.Telephony.Sms.CONTENT_URI,
+                    arrayOf(
+                        android.provider.Telephony.Sms.ADDRESS,
+                        android.provider.Telephony.Sms.BODY,
+                        android.provider.Telephony.Sms.DATE,
+                        android.provider.Telephony.Sms.READ,
+                    ),
+                    selection,
+                    if (selectionArgs.isEmpty()) null else selectionArgs.toTypedArray(),
+                    "${android.provider.Telephony.Sms.DATE} DESC LIMIT 20",
+                )?.use { cursor ->
+                    val addressIdx = cursor.getColumnIndex(android.provider.Telephony.Sms.ADDRESS)
+                    val bodyIdx = cursor.getColumnIndex(android.provider.Telephony.Sms.BODY)
+                    val dateIdx = cursor.getColumnIndex(android.provider.Telephony.Sms.DATE)
+                    val readIdx = cursor.getColumnIndex(android.provider.Telephony.Sms.READ)
+                    while (cursor.moveToNext()) {
+                        val address = cursor.getString(addressIdx) ?: ""
+                        results.put(org.json.JSONObject().apply {
+                            put("from", resolveContactNameForNumber(context, address) ?: address)
+                            put("text", cursor.getString(bodyIdx) ?: "")
+                            put("date_epoch_ms", cursor.getLong(dateIdx))
+                            put("unread", cursor.getInt(readIdx) == 0)
+                        })
+                    }
+                }
+            } catch (t: Throwable) {
+                return org.json.JSONObject().apply { put("error", "Failed to query SMS: ${t.message}") }
+            }
+
+            return org.json.JSONObject().apply {
+                put("count", results.length())
+                put("messages", results)
+            }
+        }
+
+        private fun resolveContactNumbers(context: android.content.Context, nameHint: String): List<String> {
+            val numbers = mutableListOf<String>()
+            runCatching {
+                context.contentResolver.query(
+                    android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                    arrayOf(
+                        android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER,
+                        android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                    ),
+                    "${android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
+                    arrayOf("%$nameHint%"),
+                    null,
+                )?.use { cursor ->
+                    val numberIdx = cursor.getColumnIndex(android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER)
+                    while (cursor.moveToNext()) numbers.add(cursor.getString(numberIdx))
+                }
+            }
+            return numbers
+        }
+
+        private fun resolveContactNameForNumber(context: android.content.Context, phoneNumber: String): String? {
+            val uri = android.net.Uri.withAppendedPath(
+                android.provider.ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
+                android.net.Uri.encode(phoneNumber),
+            )
+            return runCatching {
+                context.contentResolver.query(
+                    uri, arrayOf(android.provider.ContactsContract.PhoneLookup.DISPLAY_NAME), null, null, null,
+                )?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+            }.getOrNull()
+        }
     }
 
     private var client: GeminiLiveClient? = null
@@ -238,6 +430,21 @@ class VoiceSessionService : Service() {
                 val recipientHint = call.args.optString("recipient_hint")
                 val result = sendWhatsAppReply(applicationContext, message, recipientHint)
                 if (call.id.isNotEmpty()) client.sendToolResponse(call.id, result)
+            }
+            "reply_sms" -> {
+                val message = call.args.optString("message")
+                val recipientHint = call.args.optString("recipient_hint")
+                val result = sendSmsReply(applicationContext, message, recipientHint)
+                if (call.id.isNotEmpty()) client.sendToolResponse(call.id, result)
+            }
+            "query_sms" -> {
+                serviceScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    val contactHint = call.args.optString("contact_hint")
+                    val timeRange = call.args.optString("time_range", "all")
+                    val unreadOnly = call.args.optBoolean("unread_only", false)
+                    val result = querySms(applicationContext, contactHint, timeRange, unreadOnly)
+                    if (call.id.isNotEmpty()) client.sendToolResponse(call.id, result)
+                }
             }
             else -> respond(client, call, "error", "Unknown function: ${call.name}")
         }

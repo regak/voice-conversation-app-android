@@ -73,6 +73,22 @@ class MainActivity : ComponentActivity() {
         // won't be visible.
     }
 
+    /** Driving mode's SMS side needs its own runtime permissions (a normal
+     *  dialog, unlike WhatsApp's manual Settings toggle). Only flips the
+     *  toggle on if the two that matter -- receive + send -- are granted;
+     *  contacts is nice-to-have for name resolution, not required. */
+    private val requestSmsPermissions = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        val canReceive = results[Manifest.permission.RECEIVE_SMS] == true
+        val canSend = results[Manifest.permission.SEND_SMS] == true
+        if (canReceive && canSend) {
+            VoiceSessionService.drivingMode.value = true
+        } else {
+            viewModel.lastError.value = "SMS permissions denied -- Driving mode needs them to read/reply to texts."
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         installCrashHandler()
@@ -84,6 +100,16 @@ class MainActivity : ComponentActivity() {
                     viewModel = viewModel,
                     onStartRequested = { startWithPermissionCheck() },
                     onStopRequested = { viewModel.stop() },
+                    onRequestSmsPermissions = {
+                        requestSmsPermissions.launch(
+                            arrayOf(
+                                Manifest.permission.RECEIVE_SMS,
+                                Manifest.permission.SEND_SMS,
+                                Manifest.permission.READ_SMS,
+                                Manifest.permission.READ_CONTACTS,
+                            ),
+                        )
+                    },
                 )
             }
         }
@@ -196,6 +222,7 @@ fun VoiceOrbScreen(
     viewModel: VoiceSessionViewModel,
     onStartRequested: () -> Unit,
     onStopRequested: () -> Unit,
+    onRequestSmsPermissions: () -> Unit,
 ) {
     val orbState by viewModel.orbState
     val error by viewModel.lastError
@@ -251,7 +278,7 @@ fun VoiceOrbScreen(
                 Column {
                     Text("Driving mode", color = Color.White, fontSize = 13.sp)
                     Text(
-                        "Reads WhatsApp messages aloud, reply by voice",
+                        "Reads WhatsApp + SMS aloud, reply by voice",
                         color = Color(0xFF9AA0A6),
                         fontSize = 10.sp,
                     )
@@ -259,6 +286,11 @@ fun VoiceOrbScreen(
                 Switch(
                     checked = drivingMode,
                     onCheckedChange = { wantsOn ->
+                        val smsGranted = ContextCompat.checkSelfPermission(
+                            context, Manifest.permission.RECEIVE_SMS,
+                        ) == PackageManager.PERMISSION_GRANTED && ContextCompat.checkSelfPermission(
+                            context, Manifest.permission.SEND_SMS,
+                        ) == PackageManager.PERMISSION_GRANTED
                         if (wantsOn && !WhatsAppNotificationListener.isEnabled(context)) {
                             viewModel.lastError.value =
                                 "Grant 'Notification access' for Voice Orb in the screen " +
@@ -266,6 +298,8 @@ fun VoiceOrbScreen(
                             context.startActivity(
                                 android.content.Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS),
                             )
+                        } else if (wantsOn && !smsGranted) {
+                            onRequestSmsPermissions()
                         } else {
                             VoiceSessionService.drivingMode.value = wantsOn
                         }

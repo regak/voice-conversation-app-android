@@ -196,6 +196,64 @@ class GeminiLiveClient(
                                 put("required", JSONArray(listOf("message")))
                             })
                         },
+                        JSONObject().apply {
+                            put("name", "reply_sms")
+                            put(
+                                "description",
+                                "Sends a plain SMS reply to a conversation that just " +
+                                    "sent a new text message (announced to you via a " +
+                                    "SYSTEM NOTICE). Use when the user says what they " +
+                                    "want to reply. Draft the actual message text " +
+                                    "yourself from what the user said.",
+                            )
+                            put("parameters", JSONObject().apply {
+                                put("type", "OBJECT")
+                                put("properties", JSONObject().apply {
+                                    put("message", JSONObject().apply {
+                                        put("type", "STRING")
+                                        put("description", "The reply text to send, drafted from what the user said.")
+                                    })
+                                    put("recipient_hint", JSONObject().apply {
+                                        put("type", "STRING")
+                                        put(
+                                            "description",
+                                            "Optional: the name or number of who to reply to, " +
+                                                "if more than one SMS conversation might be " +
+                                                "pending. Omit to reply to the most recent one.",
+                                        )
+                                    })
+                                })
+                                put("required", JSONArray(listOf("message")))
+                            })
+                        },
+                        JSONObject().apply {
+                            put("name", "query_sms")
+                            put(
+                                "description",
+                                "Searches the user's actual SMS message history on the " +
+                                    "phone (not just new arrivals). Use for requests like " +
+                                    "'read my messages from Mom today', 'any unread texts?', " +
+                                    "or 'what did John say yesterday'. Returns a list of " +
+                                    "matching messages for you to summarize/read aloud.",
+                            )
+                            put("parameters", JSONObject().apply {
+                                put("type", "OBJECT")
+                                put("properties", JSONObject().apply {
+                                    put("contact_hint", JSONObject().apply {
+                                        put("type", "STRING")
+                                        put("description", "Optional: a contact name to filter by, e.g. 'Mom'. Omit to search all senders.")
+                                    })
+                                    put("time_range", JSONObject().apply {
+                                        put("type", "STRING")
+                                        put("description", "One of: 'today', 'yesterday', 'this_week', or 'all' (default).")
+                                    })
+                                    put("unread_only", JSONObject().apply {
+                                        put("type", "BOOLEAN")
+                                        put("description", "True to only return unread received messages. Defaults to false.")
+                                    })
+                                })
+                            })
+                        },
                     ))),
                 )))
             })
