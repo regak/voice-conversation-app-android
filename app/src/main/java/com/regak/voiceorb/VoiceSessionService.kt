@@ -812,6 +812,24 @@ class VoiceSessionService : Service() {
             log("giving up auto-reconnect after $reconnectAttempts attempts: $reason")
             return
         }
+        // A stale/expired session-resumption handle gets rejected by the
+        // server with "session not found" (WS close code 1008) before
+        // setup ever completes. Retrying with the SAME bad handle would
+        // just repeat the identical rejection three more times and still
+        // end up stuck in ERROR. Self-heal by dropping the handle and
+        // starting a brand-new (non-resumed) session instead -- losing
+        // mid-air context recovery is much better than never connecting.
+        if (reason.contains("session not found", ignoreCase = true) ||
+            reason.contains("closed before setup completed", ignoreCase = true)
+        ) {
+            log("clearing possibly-stale session-resumption handle before retrying")
+            lastResumeHandle = null
+            activeSessionId?.let { id ->
+                SessionManager.loadAll(applicationContext).firstOrNull { it.id == id }?.let { session ->
+                    SessionManager.updateSession(applicationContext, session.copy(resumeHandle = null))
+                }
+            }
+        }
         val delayMs = when (reconnectAttempts) {
             1 -> 2_000L
             2 -> 5_000L

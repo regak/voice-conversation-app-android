@@ -128,6 +128,25 @@ class GeminiLiveClient(
                 emit(Event.Failure("${t.javaClass.simpleName}: ${t.message} httpCode=$code body=$body"))
             }
 
+            // The server-initiated graceful close handshake (e.g. code 1008
+            // "policy violation" when a stale/expired session-resumption
+            // handle is rejected with "session not found"). OkHttp requires
+            // the CLIENT to echo back webSocket.close() to complete this
+            // handshake before onClosed() will ever fire -- without this
+            // override, a server-side close before setup completes left the
+            // app stuck showing "Connecting..." forever (no Failure/Closed
+            // event was ever emitted, since onClosed() never ran).
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                Log.i(TAG, "WebSocket closing: code=$code reason=$reason")
+                webSocket.close(code, reason)
+                if (!setupAcked.get()) {
+                    // Never got through setup -- surface as a real failure
+                    // (not a quiet Closed/IDLE) so the UI doesn't hang and
+                    // the caller's reconnect/retry logic kicks in.
+                    emit(Event.Failure("WebSocket closed before setup completed: code=$code reason=$reason"))
+                }
+            }
+
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 emit(Event.Closed("code=$code reason=$reason"))
             }
