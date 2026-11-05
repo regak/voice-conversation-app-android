@@ -7,6 +7,7 @@ import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.util.Base64
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -103,6 +104,8 @@ class AudioEngine(
                             onLog("AudioRecord.read error code=$read")
                         }
                     }
+                } catch (t: CancellationException) {
+                    throw t // normal cooperative cancellation (stopCapture) -- not an error
                 } catch (t: Throwable) {
                     onError("capture loop crashed: ${t.javaClass.simpleName}: ${t.message}")
                 }
@@ -164,10 +167,14 @@ class AudioEngine(
                 for (chunk in playbackQueue) {
                     try {
                         audioTrack?.write(chunk, 0, chunk.size)
+                    } catch (t: CancellationException) {
+                        throw t
                     } catch (t: Throwable) {
                         onError("playback write failed: ${t.javaClass.simpleName}: ${t.message}")
                     }
                 }
+            } catch (t: CancellationException) {
+                // normal cooperative cancellation (release()/stop()) -- not an error
             } catch (t: Throwable) {
                 onError("playback consumer crashed: ${t.javaClass.simpleName}: ${t.message}")
             }

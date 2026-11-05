@@ -146,6 +146,8 @@ class VoiceSessionViewModel : ViewModel() {
                             orbState.value = OrbState.IDLE
                         }
                     }
+                } catch (t: kotlinx.coroutines.CancellationException) {
+                    throw t // normal cooperative cancellation (ViewModel cleared) -- not an error
                 } catch (t: Throwable) {
                     failWith("event handling (${event.javaClass.simpleName})", t)
                 }
@@ -165,6 +167,7 @@ class VoiceSessionViewModel : ViewModel() {
         audioEngine = null
         client = null
         openTranscriptLine = null
+        lastError.value = null
         orbState.value = OrbState.IDLE
     }
 
