@@ -183,6 +183,32 @@ class GeminiLiveClient(
                             put("description", "Closes the embedded YouTube player.")
                             put("parameters", JSONObject().apply { put("type", "OBJECT") })
                         },
+                        JSONObject().apply {
+                            put("name", "forward_youtube")
+                            put("description", "Skips the embedded video forward by a number of seconds (default 10 if not specified).")
+                            put("parameters", JSONObject().apply {
+                                put("type", "OBJECT")
+                                put("properties", JSONObject().apply {
+                                    put("seconds", JSONObject().apply {
+                                        put("type", "INTEGER")
+                                        put("description", "How many seconds to skip forward. Defaults to 10.")
+                                    })
+                                })
+                            })
+                        },
+                        JSONObject().apply {
+                            put("name", "rewind_youtube")
+                            put("description", "Skips the embedded video backward by a number of seconds (default 10 if not specified).")
+                            put("parameters", JSONObject().apply {
+                                put("type", "OBJECT")
+                                put("properties", JSONObject().apply {
+                                    put("seconds", JSONObject().apply {
+                                        put("type", "INTEGER")
+                                        put("description", "How many seconds to rewind. Defaults to 10.")
+                                    })
+                                })
+                            })
+                        },
                     ))),
                 )))
             })

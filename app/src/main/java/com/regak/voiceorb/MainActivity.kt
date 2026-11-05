@@ -292,12 +292,18 @@ fun VoiceOrbScreen(
             // real, reliable controls.
             val currentVideo by VoiceSessionService.currentVideo
             val playerCommand by VoiceSessionService.playerCommand
+            val playerError by VoiceSessionService.playerError
             currentVideo?.let { video ->
                 EmbeddedYoutubePlayer(
                     video = video,
                     command = playerCommand,
+                    error = playerError,
                     onCommandConsumed = { VoiceSessionService.playerCommand.value = null },
-                    onClose = { VoiceSessionService.currentVideo.value = null },
+                    onError = { VoiceSessionService.playerError.value = it },
+                    onClose = {
+                        VoiceSessionService.currentVideo.value = null
+                        VoiceSessionService.playerError.value = null
+                    },
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
                 )
             }

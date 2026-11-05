@@ -46,6 +46,7 @@ sealed class PlayerCommand {
     object Play : PlayerCommand()
     object Pause : PlayerCommand()
     object Close : PlayerCommand()
+    data class Seek(val deltaSeconds: Int) : PlayerCommand()
 }
 
 class VoiceSessionService : Service() {
@@ -80,6 +81,13 @@ class VoiceSessionService : Service() {
         // and then clear back to null (so re-sending the same command
         // later still triggers a state change).
         val playerCommand = mutableStateOf<PlayerCommand?>(null)
+        // Set by the embedded player's JS bridge when YouTube itself
+        // reports an error (most commonly: this specific video's owner
+        // disabled embedding). The UI shows a friendly fallback with a
+        // button to open the real YouTube app instead, since that per-
+        // video restriction is YouTube's own policy and not something any
+        // app can legitimately bypass.
+        val playerError = mutableStateOf<String?>(null)
     }
 
     private var client: GeminiLiveClient? = null
@@ -180,6 +188,16 @@ class VoiceSessionService : Service() {
                 currentVideo.value = null
                 respond(client, call, "result", "closed")
             }
+            "forward_youtube" -> {
+                val seconds = call.args.optInt("seconds", 10).coerceIn(1, 600)
+                playerCommand.value = PlayerCommand.Seek(seconds)
+                respond(client, call, "result", "forwarded $seconds seconds")
+            }
+            "rewind_youtube" -> {
+                val seconds = call.args.optInt("seconds", 10).coerceIn(1, 600)
+                playerCommand.value = PlayerCommand.Seek(-seconds)
+                respond(client, call, "result", "rewound $seconds seconds")
+            }
             else -> respond(client, call, "error", "Unknown function: ${call.name}")
         }
     }
@@ -217,6 +235,7 @@ class VoiceSessionService : Service() {
         }
         val (videoId, title) = searchResult
 
+        playerError.value = null
         currentVideo.value = YoutubeVideo(videoId, title)
         playerCommand.value = PlayerCommand.Play
         log("loaded into embedded player: '$title' ($videoId) for query '$query'")
@@ -229,32 +248,68 @@ class VoiceSessionService : Service() {
 
     private val httpClient = okhttp3.OkHttpClient()
 
-    /** Real YouTube Data API v3 search -- returns (videoId, title) of the
-     *  top result, or null if nothing matched. Runs on Dispatchers.IO
-     *  (blocking call), never the main thread. */
+    /** Searches YouTube for [query] via the Data API v3, then filters to
+     *  only videos the owner has allowed to be embedded elsewhere (the
+     *  "status.embeddable" field) -- picking a non-embeddable video would
+     *  just show YouTube's own "this video is unavailable" error inside
+     *  our iframe player, since that per-video restriction is enforced by
+     *  YouTube itself and cannot legitimately be bypassed. Returns the
+     *  first embeddable match, or null if none of the top candidates allow
+     *  embedding. Runs on Dispatchers.IO (blocking calls), never the main
+     *  thread. */
     private fun searchYoutube(query: String, apiKey: String): Pair<String, String>? {
-        val url = "https://www.googleapis.com/youtube/v3/search".toHttpUrl().newBuilder()
+        val searchUrl = "https://www.googleapis.com/youtube/v3/search".toHttpUrl().newBuilder()
             .addQueryParameter("part", "snippet")
             .addQueryParameter("q", query)
             .addQueryParameter("type", "video")
-            .addQueryParameter("maxResults", "1")
+            .addQueryParameter("maxResults", "5")
             .addQueryParameter("key", apiKey)
             .build()
-        val request = okhttp3.Request.Builder().url(url).build()
-        httpClient.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw java.io.IOException("YouTube API returned HTTP ${response.code}: ${response.body?.string()?.take(300)}")
+        val candidates = linkedMapOf<String, String>() // videoId -> title, in result order
+        okhttp3.Request.Builder().url(searchUrl).build().let { request ->
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw java.io.IOException("YouTube search API returned HTTP ${response.code}: ${response.body?.string()?.take(300)}")
+                }
+                val items = org.json.JSONObject(response.body?.string() ?: return null).optJSONArray("items") ?: return null
+                for (i in 0 until items.length()) {
+                    val item = items.getJSONObject(i)
+                    val videoId = item.getJSONObject("id").optString("videoId")
+                    val title = item.getJSONObject("snippet").optString("title")
+                    if (videoId.isNotBlank()) candidates[videoId] = title
+                }
             }
-            val body = response.body?.string() ?: return null
-            val json = org.json.JSONObject(body)
-            val items = json.optJSONArray("items") ?: return null
-            if (items.length() == 0) return null
-            val first = items.getJSONObject(0)
-            val videoId = first.getJSONObject("id").optString("videoId")
-            val title = first.getJSONObject("snippet").optString("title")
-            if (videoId.isBlank()) return null
-            return videoId to title
         }
+        if (candidates.isEmpty()) return null
+
+        val statusUrl = "https://www.googleapis.com/youtube/v3/videos".toHttpUrl().newBuilder()
+            .addQueryParameter("part", "status")
+            .addQueryParameter("id", candidates.keys.joinToString(","))
+            .addQueryParameter("key", apiKey)
+            .build()
+        val embeddableIds = linkedSetOf<String>()
+        okhttp3.Request.Builder().url(statusUrl).build().let { request ->
+            httpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val items = org.json.JSONObject(response.body?.string() ?: "{}").optJSONArray("items")
+                    if (items != null) {
+                        for (i in 0 until items.length()) {
+                            val item = items.getJSONObject(i)
+                            val id = item.optString("id")
+                            val embeddable = item.optJSONObject("status")?.optBoolean("embeddable", true) ?: true
+                            if (embeddable && id.isNotBlank()) embeddableIds.add(id)
+                        }
+                    }
+                }
+                // If the status check itself fails for any reason, fall
+                // back to trusting the original search order rather than
+                // blocking playback entirely.
+            }
+        }
+
+        val chosenId = candidates.keys.firstOrNull { embeddableIds.contains(it) || embeddableIds.isEmpty() }
+            ?: return null
+        return chosenId to (candidates[chosenId] ?: "")
     }
 
     private fun startSession(apiKeyValue: String) {
