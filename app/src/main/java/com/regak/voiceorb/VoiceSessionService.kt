@@ -41,7 +41,9 @@ class VoiceSessionService : Service() {
     companion object {
         private const val TAG = "VoiceSessionService"
         private const val CHANNEL_ID = "voice_session"
+        private const val VIDEO_READY_CHANNEL_ID = "video_ready"
         private const val NOTIFICATION_ID = 1001
+        private const val VIDEO_READY_NOTIFICATION_ID = 1002
 
         const val ACTION_START = "com.regak.voiceorb.action.START"
         const val ACTION_STOP = "com.regak.voiceorb.action.STOP"
@@ -178,26 +180,40 @@ class VoiceSessionService : Service() {
 
         return try {
             // Relay through MainActivity instead of starting the YouTube
-            // activity directly from this background service. Android's
-            // Background Activity Launch restrictions can silently block a
-            // service from popping open another app's UI depending on
-            // whether Voice Orb's own UI happens to be visible at that
-            // moment -- which is exactly what caused "sometimes opens,
-            // sometimes doesn't" in testing. Launching your OWN app's
-            // activity from a service is always allowed; MainActivity then
-            // performs the actual YouTube launch from an active foreground
-            // context, where it is reliably exempt from BAL restrictions.
+            // activity directly from this background service. Launching
+            // your OWN app's activity from a service is always allowed, and
+            // if MainActivity was recently foregrounded this reliably opens
+            // YouTube immediately.
             val relayIntent = Intent(this, MainActivity::class.java).apply {
                 action = MainActivity.ACTION_OPEN_YOUTUBE
                 putExtra(MainActivity.EXTRA_VIDEO_URL, videoUrl)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             startActivity(relayIntent)
+
+            // ALSO post a tappable fallback notification every time, not
+            // just on failure -- Android gives no way to detect whether the
+            // direct launch above actually reached the screen or was
+            // silently dropped by the Background Activity Launch
+            // restriction (this happens specifically when another app, like
+            // YouTube itself, currently has focus -- intentional anti-
+            // hijack behavior, not something any app can fully bypass).
+            // Tapping a notification is always a direct user action, so
+            // this is a guaranteed way to actually reach the video.
+            postVideoReadyNotification(videoUrl, title)
+
             log("playing real search result '$title' ($videoId) for query '$query'")
             org.json.JSONObject().apply {
                 put("result", "opened")
                 put("video_url", videoUrl)
                 put("title", title)
+                put(
+                    "note",
+                    "A 'Tap to play' notification was also posted as a backup -- " +
+                        "mention it briefly in case the app couldn't switch to " +
+                        "YouTube automatically (e.g. the user is currently inside " +
+                        "another app).",
+                )
             }
         } catch (t: Throwable) {
             log("play_youtube failed: ${t.javaClass.simpleName}: ${t.message}")
@@ -343,13 +359,26 @@ class VoiceSessionService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Voice Orb session",
-                NotificationManager.IMPORTANCE_LOW, // low = no sound, still visible
-            )
             val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    CHANNEL_ID,
+                    "Voice Orb session",
+                    NotificationManager.IMPORTANCE_LOW, // low = no sound, still visible
+                )
+            )
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    VIDEO_READY_CHANNEL_ID,
+                    "Video ready to play",
+                    // HIGH so it shows as a heads-up banner even while
+                    // another app (like YouTube itself) has focus -- this is
+                    // the fallback for when Android's background-activity-
+                    // launch restriction blocks the app from auto-opening
+                    // YouTube directly (see dispatchVideoReadyNotification).
+                    NotificationManager.IMPORTANCE_HIGH,
+                )
+            )
         }
     }
 
@@ -385,6 +414,34 @@ class VoiceSessionService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+    }
+
+    /** Guaranteed fallback for opening a video: a tappable, high-priority
+     *  notification the user can tap to actually open it when the direct
+     *  launch was silently blocked by Android's background-activity-launch
+     *  restriction (e.g. because YouTube itself currently has focus).
+     *  Tapping a notification is always counted as a direct user action, so
+     *  this is never subject to that restriction. */
+    private fun postVideoReadyNotification(videoUrl: String, title: String) {
+        val relayIntent = Intent(this, MainActivity::class.java).apply {
+            action = MainActivity.ACTION_OPEN_YOUTUBE
+            putExtra(MainActivity.EXTRA_VIDEO_URL, videoUrl)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this, videoUrl.hashCode(), relayIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val notification = NotificationCompat.Builder(this, VIDEO_READY_CHANNEL_ID)
+            .setContentTitle("Tap to play")
+            .setContentText(title.ifBlank { "Video ready" })
+            .setSmallIcon(R.drawable.ic_notification_mic)
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+        val manager = getSystemService(NotificationManager::class.java)
+        runCatching { manager.notify(VIDEO_READY_NOTIFICATION_ID, notification) }
     }
 
     private fun updateNotification(statusText: String) {
