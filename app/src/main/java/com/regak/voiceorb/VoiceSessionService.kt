@@ -128,6 +128,61 @@ class VoiceSessionService : Service() {
         openTranscriptLine = null
     }
 
+    /** Dispatches a parsed tool call to a real native action and reports the
+     *  result back to the model so it can confirm verbally ("Playing it
+     *  now"). Unknown function names get an error response rather than being
+     *  silently ignored, so the model doesn't hang waiting for a reply it
+     *  will never get. */
+    private fun dispatchToolCall(client: GeminiLiveClient, call: GeminiLiveClient.Event.ToolCall) {
+        val result: org.json.JSONObject = when (call.name) {
+            "play_youtube" -> handlePlayYoutube(call.args)
+            else -> org.json.JSONObject().apply {
+                put("error", "Unknown function: ${call.name}")
+            }
+        }
+        if (call.id.isNotEmpty()) {
+            client.sendToolResponse(call.id, result)
+        } else {
+            log("toolCall had no id -- cannot send toolResponse for ${call.name}")
+        }
+    }
+
+    private fun handlePlayYoutube(args: org.json.JSONObject): org.json.JSONObject {
+        val videoUrl = args.optString("video_url")
+        if (videoUrl.isBlank()) {
+            return org.json.JSONObject().apply {
+                put("error", "video_url was missing or blank")
+            }
+        }
+        return try {
+            val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(videoUrl)).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                // Prefer the YouTube app itself when installed, so this
+                // doesn't just open a browser tab.
+                setPackage("com.google.android.youtube")
+            }
+            if (intent.resolveActivity(packageManager) != null) {
+                startActivity(intent)
+            } else {
+                // YouTube app not installed (or can't resolve) -- fall back
+                // to whatever handles the URL (browser, or Android's normal
+                // app-link resolution).
+                startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(videoUrl))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
+            log("opened YouTube: $videoUrl")
+            org.json.JSONObject().apply {
+                put("result", "opened")
+                put("video_url", videoUrl)
+            }
+        } catch (t: Throwable) {
+            log("play_youtube failed: ${t.javaClass.simpleName}: ${t.message}")
+            org.json.JSONObject().apply {
+                put("error", "Failed to open video: ${t.message}")
+            }
+        }
+    }
+
     private fun startSession(apiKeyValue: String) {
         if (client != null) return // already running
         if (apiKeyValue.isBlank()) {
@@ -190,8 +245,8 @@ class VoiceSessionService : Service() {
                             updateNotification("Listening...")
                         }
                         is GeminiLiveClient.Event.ToolCall -> {
-                            log("toolCall: ${event.raw}")
-                            // TODO: dispatch to native tool handlers (search / open_url / etc).
+                            log("toolCall: name=${event.name} args=${event.args}")
+                            dispatchToolCall(gemini, event)
                         }
                         is GeminiLiveClient.Event.RawServerMessage -> {
                             log("recv: ${event.text.take(500)}")

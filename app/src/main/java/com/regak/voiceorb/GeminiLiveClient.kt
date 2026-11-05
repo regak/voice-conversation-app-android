@@ -58,7 +58,7 @@ class GeminiLiveClient(
         data class TranscriptDelta(val text: String, val isModel: Boolean) : Event()
         data class Interrupted(val raw: String) : Event()
         data class TurnComplete(val raw: String) : Event()
-        data class ToolCall(val raw: JSONObject) : Event()
+        data class ToolCall(val id: String, val name: String, val args: JSONObject) : Event()
         data class RawServerMessage(val text: String) : Event()
         data class Failure(val message: String) : Event()
         data class Closed(val reason: String) : Event()
@@ -131,6 +131,47 @@ class GeminiLiveClient(
                 })
                 put("inputAudioTranscription", JSONObject())
                 put("outputAudioTranscription", JSONObject())
+                put("tools", JSONArray(listOf(
+                    // NOTE: googleSearch grounding is deliberately NOT
+                    // enabled here -- it requires a billing-enabled Gemini
+                    // API tier and immediately fails the ENTIRE session with
+                    // a quota error on a free-tier key (confirmed via a
+                    // standalone test). Without it, the model gracefully
+                    // falls back to a youtube.com/results?search_query=...
+                    // URL when it doesn't know an exact video -- see the
+                    // function description below -- which is arguably safer
+                    // anyway (never plays a hallucinated/wrong video id).
+                    JSONObject().put("functionDeclarations", JSONArray(listOf(
+                        JSONObject().apply {
+                            put("name", "play_youtube")
+                            put(
+                                "description",
+                                "Plays a YouTube video for the user by opening the " +
+                                    "YouTube app. If you know the exact, real " +
+                                    "youtube.com/watch?v=... URL for what the user asked " +
+                                    "for, use that. If you are not certain of the exact " +
+                                    "video, instead use a YouTube search URL in the form " +
+                                    "https://www.youtube.com/results?search_query=<query> " +
+                                    "with the user's request as the query -- never invent " +
+                                    "or guess a specific video ID you are not sure is real.",
+                            )
+                            put("parameters", JSONObject().apply {
+                                put("type", "OBJECT")
+                                put("properties", JSONObject().apply {
+                                    put("video_url", JSONObject().apply {
+                                        put("type", "STRING")
+                                        put("description", "A youtube.com/watch?v=... URL, or a youtube.com/results?search_query=... search URL as a fallback.")
+                                    })
+                                    put("title", JSONObject().apply {
+                                        put("type", "STRING")
+                                        put("description", "Short human-readable title of the video, to confirm to the user.")
+                                    })
+                                })
+                                put("required", JSONArray(listOf("video_url")))
+                            })
+                        },
+                    ))),
+                )))
             })
         }
         val payload = setup.toString()
@@ -158,7 +199,17 @@ class GeminiLiveClient(
 
         if (json.has("toolCall")) {
             emit(Event.RawServerMessage(text))
-            emit(Event.ToolCall(json.getJSONObject("toolCall")))
+            val toolCall = json.getJSONObject("toolCall")
+            val functionCalls = toolCall.optJSONArray("functionCalls")
+            if (functionCalls != null) {
+                for (i in 0 until functionCalls.length()) {
+                    val call = functionCalls.getJSONObject(i)
+                    val id = call.optString("id")
+                    val name = call.optString("name")
+                    val args = call.optJSONObject("args") ?: JSONObject()
+                    emit(Event.ToolCall(id, name, args))
+                }
+            }
             return
         }
 
