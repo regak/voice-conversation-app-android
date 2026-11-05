@@ -136,38 +136,31 @@ class GeminiLiveClient(
                     // enabled here -- it requires a billing-enabled Gemini
                     // API tier and immediately fails the ENTIRE session with
                     // a quota error on a free-tier key (confirmed via a
-                    // standalone test). Without it, the model gracefully
-                    // falls back to a youtube.com/results?search_query=...
-                    // URL when it doesn't know an exact video -- see the
-                    // function description below -- which is arguably safer
-                    // anyway (never plays a hallucinated/wrong video id).
+                    // standalone test). Instead, play_youtube takes a plain
+                    // search query and the APP performs a real YouTube Data
+                    // API v3 search itself to resolve the exact video --
+                    // guaranteed real playback, never a hallucinated video.
                     JSONObject().put("functionDeclarations", JSONArray(listOf(
                         JSONObject().apply {
                             put("name", "play_youtube")
                             put(
                                 "description",
-                                "Plays a YouTube video for the user by opening the " +
-                                    "YouTube app. If you know the exact, real " +
-                                    "youtube.com/watch?v=... URL for what the user asked " +
-                                    "for, use that. If you are not certain of the exact " +
-                                    "video, instead use a YouTube search URL in the form " +
-                                    "https://www.youtube.com/results?search_query=<query> " +
-                                    "with the user's request as the query -- never invent " +
-                                    "or guess a specific video ID you are not sure is real.",
+                                "Plays a YouTube video for the user by searching YouTube " +
+                                    "for the given query and opening the top real result " +
+                                    "in the YouTube app. Pass the user's request as a " +
+                                    "natural search query (e.g. 'Dune Part Two official " +
+                                    "trailer', 'lo-fi study music') -- do not try to guess " +
+                                    "a video URL or ID yourself.",
                             )
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
                                 put("properties", JSONObject().apply {
-                                    put("video_url", JSONObject().apply {
+                                    put("query", JSONObject().apply {
                                         put("type", "STRING")
-                                        put("description", "A youtube.com/watch?v=... URL, or a youtube.com/results?search_query=... search URL as a fallback.")
-                                    })
-                                    put("title", JSONObject().apply {
-                                        put("type", "STRING")
-                                        put("description", "Short human-readable title of the video, to confirm to the user.")
+                                        put("description", "Natural-language search query describing the video to play.")
                                     })
                                 })
-                                put("required", JSONArray(listOf("video_url")))
+                                put("required", JSONArray(listOf("query")))
                             })
                         },
                     ))),

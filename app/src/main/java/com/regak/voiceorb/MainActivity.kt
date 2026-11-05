@@ -52,6 +52,11 @@ import com.regak.voiceorb.ui.theme.VoiceOrbTheme
 
 class MainActivity : ComponentActivity() {
 
+    companion object {
+        const val ACTION_OPEN_YOUTUBE = "com.regak.voiceorb.action.OPEN_YOUTUBE"
+        const val EXTRA_VIDEO_URL = "video_url"
+    }
+
     private val viewModel: VoiceSessionViewModel by viewModels()
 
     private val requestPermissions = registerForActivityResult(
@@ -88,6 +93,42 @@ class MainActivity : ComponentActivity() {
             // only way to see what the LAST run actually crashed with.
             viewModel.lastError.value = "Previous run crashed:\n$previousCrash"
             viewModel.orbState.value = OrbState.ERROR
+        }
+
+        handleIncomingIntent(intent)
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingIntent(intent)
+    }
+
+    /** Opens YouTube when asked to via [ACTION_OPEN_YOUTUBE] (sent by
+     *  VoiceSessionService). This is a deliberate two-hop relay instead of
+     *  the Service calling startActivity() directly on the YouTube intent:
+     *  Android's Background Activity Launch restrictions (tightened on
+     *  Android 10+, further on 12+) can silently block a background
+     *  service from popping open another app's UI, which is exactly what
+     *  caused "sometimes opens, sometimes doesn't" in testing. Launching
+     *  your OWN app's activity from a service is always allowed, and once
+     *  THIS activity is actively starting/resuming, it is itself a
+     *  foreground context -- so the YouTube launch from here is reliably
+     *  exempt from BAL restrictions. */
+    private fun handleIncomingIntent(intent: android.content.Intent?) {
+        if (intent?.action != ACTION_OPEN_YOUTUBE) return
+        val videoUrl = intent.getStringExtra(EXTRA_VIDEO_URL) ?: return
+        try {
+            val youtubeIntent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(videoUrl)).apply {
+                setPackage("com.google.android.youtube")
+            }
+            if (youtubeIntent.resolveActivity(packageManager) != null) {
+                startActivity(youtubeIntent)
+            } else {
+                startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(videoUrl)))
+            }
+        } catch (t: Throwable) {
+            viewModel.lastError.value = "Failed to open YouTube: ${t.message}"
         }
     }
 

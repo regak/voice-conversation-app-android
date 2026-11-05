@@ -32,6 +32,13 @@ android {
             ?: project.findProperty("GEMINI_API_KEY") as String?
             ?: "")
         buildConfigField("String", "GEMINI_API_KEY", "\"$geminiApiKey\"")
+
+        // YouTube Data API v3 key, used to resolve a spoken search query into
+        // a real, exact video (instead of trusting the model to guess a URL).
+        val youtubeApiKey = (localProperties.getProperty("YOUTUBE_API_KEY")
+            ?: project.findProperty("YOUTUBE_API_KEY") as String?
+            ?: "")
+        buildConfigField("String", "YOUTUBE_API_KEY", "\"$youtubeApiKey\"")
     }
 
     buildTypes {

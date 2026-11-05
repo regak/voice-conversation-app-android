@@ -21,6 +21,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import okhttp3.HttpUrl.Companion.toHttpUrl
 
 /**
  * Foreground service (type "microphone") that owns the GeminiLiveClient +
@@ -132,54 +133,105 @@ class VoiceSessionService : Service() {
      *  result back to the model so it can confirm verbally ("Playing it
      *  now"). Unknown function names get an error response rather than being
      *  silently ignored, so the model doesn't hang waiting for a reply it
-     *  will never get. */
+     *  will never get. play_youtube does a real network search, so it runs
+     *  on a background coroutine rather than blocking the event-collection
+     *  loop (which runs on the main thread). */
     private fun dispatchToolCall(client: GeminiLiveClient, call: GeminiLiveClient.Event.ToolCall) {
-        val result: org.json.JSONObject = when (call.name) {
-            "play_youtube" -> handlePlayYoutube(call.args)
-            else -> org.json.JSONObject().apply {
-                put("error", "Unknown function: ${call.name}")
+        when (call.name) {
+            "play_youtube" -> {
+                serviceScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    val result = handlePlayYoutube(call.args)
+                    if (call.id.isNotEmpty()) client.sendToolResponse(call.id, result)
+                }
             }
-        }
-        if (call.id.isNotEmpty()) {
-            client.sendToolResponse(call.id, result)
-        } else {
-            log("toolCall had no id -- cannot send toolResponse for ${call.name}")
+            else -> {
+                val result = org.json.JSONObject().apply { put("error", "Unknown function: ${call.name}") }
+                if (call.id.isNotEmpty()) client.sendToolResponse(call.id, result)
+            }
         }
     }
 
-    private fun handlePlayYoutube(args: org.json.JSONObject): org.json.JSONObject {
-        val videoUrl = args.optString("video_url")
-        if (videoUrl.isBlank()) {
-            return org.json.JSONObject().apply {
-                put("error", "video_url was missing or blank")
-            }
+    /** Searches YouTube for [args]'s query via the YouTube Data API v3 (a
+     *  real search, not a guess) to find the actual top video, then relays
+     *  through MainActivity to open it. This guarantees a real, specific
+     *  video plays -- never a search-results listing or a hallucinated
+     *  video ID. */
+    private suspend fun handlePlayYoutube(args: org.json.JSONObject): org.json.JSONObject {
+        val query = args.optString("query")
+        if (query.isBlank()) {
+            return org.json.JSONObject().apply { put("error", "query was missing or blank") }
         }
+        val apiKey = BuildConfig.YOUTUBE_API_KEY
+        if (apiKey.isBlank()) {
+            return org.json.JSONObject().apply { put("error", "No YouTube API key configured") }
+        }
+
+        val searchResult = runCatching { searchYoutube(query, apiKey) }.getOrElse { t ->
+            log("YouTube search failed: ${t.javaClass.simpleName}: ${t.message}")
+            return org.json.JSONObject().apply { put("error", "YouTube search failed: ${t.message}") }
+        }
+        if (searchResult == null) {
+            return org.json.JSONObject().apply { put("error", "No YouTube results found for '$query'") }
+        }
+        val (videoId, title) = searchResult
+        val videoUrl = "https://www.youtube.com/watch?v=$videoId"
+
         return try {
-            val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(videoUrl)).apply {
+            // Relay through MainActivity instead of starting the YouTube
+            // activity directly from this background service. Android's
+            // Background Activity Launch restrictions can silently block a
+            // service from popping open another app's UI depending on
+            // whether Voice Orb's own UI happens to be visible at that
+            // moment -- which is exactly what caused "sometimes opens,
+            // sometimes doesn't" in testing. Launching your OWN app's
+            // activity from a service is always allowed; MainActivity then
+            // performs the actual YouTube launch from an active foreground
+            // context, where it is reliably exempt from BAL restrictions.
+            val relayIntent = Intent(this, MainActivity::class.java).apply {
+                action = MainActivity.ACTION_OPEN_YOUTUBE
+                putExtra(MainActivity.EXTRA_VIDEO_URL, videoUrl)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                // Prefer the YouTube app itself when installed, so this
-                // doesn't just open a browser tab.
-                setPackage("com.google.android.youtube")
             }
-            if (intent.resolveActivity(packageManager) != null) {
-                startActivity(intent)
-            } else {
-                // YouTube app not installed (or can't resolve) -- fall back
-                // to whatever handles the URL (browser, or Android's normal
-                // app-link resolution).
-                startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(videoUrl))
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            }
-            log("opened YouTube: $videoUrl")
+            startActivity(relayIntent)
+            log("playing real search result '$title' ($videoId) for query '$query'")
             org.json.JSONObject().apply {
                 put("result", "opened")
                 put("video_url", videoUrl)
+                put("title", title)
             }
         } catch (t: Throwable) {
             log("play_youtube failed: ${t.javaClass.simpleName}: ${t.message}")
-            org.json.JSONObject().apply {
-                put("error", "Failed to open video: ${t.message}")
+            org.json.JSONObject().apply { put("error", "Failed to open video: ${t.message}") }
+        }
+    }
+
+    private val httpClient = okhttp3.OkHttpClient()
+
+    /** Real YouTube Data API v3 search -- returns (videoId, title) of the
+     *  top result, or null if nothing matched. Runs on Dispatchers.IO
+     *  (blocking call), never the main thread. */
+    private fun searchYoutube(query: String, apiKey: String): Pair<String, String>? {
+        val url = "https://www.googleapis.com/youtube/v3/search".toHttpUrl().newBuilder()
+            .addQueryParameter("part", "snippet")
+            .addQueryParameter("q", query)
+            .addQueryParameter("type", "video")
+            .addQueryParameter("maxResults", "1")
+            .addQueryParameter("key", apiKey)
+            .build()
+        val request = okhttp3.Request.Builder().url(url).build()
+        httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw java.io.IOException("YouTube API returned HTTP ${response.code}: ${response.body?.string()?.take(300)}")
             }
+            val body = response.body?.string() ?: return null
+            val json = org.json.JSONObject(body)
+            val items = json.optJSONArray("items") ?: return null
+            if (items.length() == 0) return null
+            val first = items.getJSONObject(0)
+            val videoId = first.getJSONObject("id").optString("videoId")
+            val title = first.getJSONObject("snippet").optString("title")
+            if (videoId.isBlank()) return null
+            return videoId to title
         }
     }
 
