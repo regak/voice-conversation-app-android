@@ -118,16 +118,22 @@ class MainActivity : ComponentActivity() {
     private fun handleIncomingIntent(intent: android.content.Intent?) {
         if (intent?.action != ACTION_OPEN_YOUTUBE) return
         val videoUrl = intent.getStringExtra(EXTRA_VIDEO_URL) ?: return
+        VoiceSessionService.debugLog.add("MainActivity.handleIncomingIntent: videoUrl=$videoUrl")
         try {
             val youtubeIntent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(videoUrl)).apply {
                 setPackage("com.google.android.youtube")
             }
-            if (youtubeIntent.resolveActivity(packageManager) != null) {
+            val resolved = youtubeIntent.resolveActivity(packageManager)
+            VoiceSessionService.debugLog.add("resolveActivity(youtube-package)=${resolved?.className ?: "null"}")
+            if (resolved != null) {
                 startActivity(youtubeIntent)
+                VoiceSessionService.debugLog.add("startActivity(youtube-package intent) called")
             } else {
                 startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(videoUrl)))
+                VoiceSessionService.debugLog.add("startActivity(generic ACTION_VIEW, no package) called")
             }
         } catch (t: Throwable) {
+            VoiceSessionService.debugLog.add("handleIncomingIntent FAILED: ${t.javaClass.simpleName}: ${t.message}")
             viewModel.lastError.value = "Failed to open YouTube: ${t.message}"
         }
     }
@@ -215,6 +221,17 @@ fun VoiceOrbScreen(
                 RoundIconButton(icon = Icons.Filled.Menu, onClick = { /* no-op: no nav drawer yet */ })
                 RoundIconButton(icon = Icons.Filled.Tune, onClick = { showDebug = !showDebug })
             }
+
+            // Visible build marker -- lets us positively confirm which APK
+            // is actually installed/running, after a prior bug where the
+            // same versionCode across releases let a sideloaded update
+            // silently fail to replace the old app on some devices.
+            Text(
+                text = "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                color = Color(0xFFC0C4CC),
+                fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 20.dp),
+            )
 
             // Full scrollable conversation history, ChatGPT-conversation-mode
             // style (both sides retained, not just the last exchange).
