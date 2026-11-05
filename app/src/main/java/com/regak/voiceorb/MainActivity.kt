@@ -286,6 +286,22 @@ fun VoiceOrbScreen(
                 }
             }
 
+            // In-app embedded YouTube player (Option C) -- shown whenever
+            // play_youtube has loaded a video. Lives inside our own UI, so
+            // there's no cross-app screen switch and pause/resume/close are
+            // real, reliable controls.
+            val currentVideo by VoiceSessionService.currentVideo
+            val playerCommand by VoiceSessionService.playerCommand
+            currentVideo?.let { video ->
+                EmbeddedYoutubePlayer(
+                    video = video,
+                    command = playerCommand,
+                    onCommandConsumed = { VoiceSessionService.playerCommand.value = null },
+                    onClose = { VoiceSessionService.currentVideo.value = null },
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                )
+            }
+
             // Centerpiece orb + status text.
             Box(
                 modifier = Modifier.fillMaxWidth(),

@@ -36,14 +36,24 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
  * from the companion object's Compose state (safe to mutate from any
  * thread -- Compose's snapshot system handles the cross-thread sync).
  */
+
+// Top-level (not nested in the companion object) so these are directly
+// referenceable as VoiceSessionService.YoutubeVideo / .PlayerCommand from
+// other files -- types declared inside a companion object block require
+// VoiceSessionService.Companion.X instead, which is easy to get wrong.
+data class YoutubeVideo(val videoId: String, val title: String)
+sealed class PlayerCommand {
+    object Play : PlayerCommand()
+    object Pause : PlayerCommand()
+    object Close : PlayerCommand()
+}
+
 class VoiceSessionService : Service() {
 
     companion object {
         private const val TAG = "VoiceSessionService"
         private const val CHANNEL_ID = "voice_session"
-        private const val VIDEO_READY_CHANNEL_ID = "video_ready"
         private const val NOTIFICATION_ID = 1001
-        private const val VIDEO_READY_NOTIFICATION_ID = 1002
 
         const val ACTION_START = "com.regak.voiceorb.action.START"
         const val ACTION_STOP = "com.regak.voiceorb.action.STOP"
@@ -59,6 +69,17 @@ class VoiceSessionService : Service() {
         val transcript = mutableStateListOf<TranscriptLine>()
         val debugLog = mutableStateListOf<String>()
         val lastError = mutableStateOf<String?>(null)
+
+        // In-app YouTube player state (Option C: embedded WebView + IFrame
+        // API, replacing the external-app-launch approach entirely -- since
+        // the player now lives inside our OWN UI, there is no cross-app
+        // screen switch needed at all, so Android's background-activity-
+        // launch restriction simply doesn't apply anymore).
+        val currentVideo = mutableStateOf<YoutubeVideo?>(null)
+        // One-shot command for the embedded player Composable to consume
+        // and then clear back to null (so re-sending the same command
+        // later still triggers a state change).
+        val playerCommand = mutableStateOf<PlayerCommand?>(null)
     }
 
     private var client: GeminiLiveClient? = null
@@ -146,18 +167,37 @@ class VoiceSessionService : Service() {
                     if (call.id.isNotEmpty()) client.sendToolResponse(call.id, result)
                 }
             }
-            else -> {
-                val result = org.json.JSONObject().apply { put("error", "Unknown function: ${call.name}") }
-                if (call.id.isNotEmpty()) client.sendToolResponse(call.id, result)
+            "pause_youtube" -> {
+                playerCommand.value = PlayerCommand.Pause
+                respond(client, call, "result", "paused")
             }
+            "resume_youtube" -> {
+                playerCommand.value = PlayerCommand.Play
+                respond(client, call, "result", "resumed")
+            }
+            "close_youtube" -> {
+                playerCommand.value = PlayerCommand.Close
+                currentVideo.value = null
+                respond(client, call, "result", "closed")
+            }
+            else -> respond(client, call, "error", "Unknown function: ${call.name}")
         }
     }
 
+    private fun respond(client: GeminiLiveClient, call: GeminiLiveClient.Event.ToolCall, key: String, value: String) {
+        if (call.id.isEmpty()) return
+        client.sendToolResponse(call.id, org.json.JSONObject().apply { put(key, value) })
+    }
+
     /** Searches YouTube for [args]'s query via the YouTube Data API v3 (a
-     *  real search, not a guess) to find the actual top video, then relays
-     *  through MainActivity to open it. This guarantees a real, specific
-     *  video plays -- never a search-results listing or a hallucinated
-     *  video ID. */
+     *  real search, not a guess) to find the actual top video, then loads it
+     *  into the app's OWN embedded player (Option C: WebView + YouTube
+     *  IFrame API) instead of launching the external YouTube app. Because
+     *  the player lives inside our own UI, there is no cross-app screen
+     *  switch involved at all -- this sidesteps Android's background-
+     *  activity-launch restriction entirely, and gives real playback
+     *  control (pause/resume/close) that an external app hand-off never
+     *  could. */
     private suspend fun handlePlayYoutube(args: org.json.JSONObject): org.json.JSONObject {
         val query = args.optString("query")
         if (query.isBlank()) {
@@ -176,48 +216,14 @@ class VoiceSessionService : Service() {
             return org.json.JSONObject().apply { put("error", "No YouTube results found for '$query'") }
         }
         val (videoId, title) = searchResult
-        val videoUrl = "https://www.youtube.com/watch?v=$videoId"
 
-        return try {
-            // Relay through MainActivity instead of starting the YouTube
-            // activity directly from this background service. Launching
-            // your OWN app's activity from a service is always allowed, and
-            // if MainActivity was recently foregrounded this reliably opens
-            // YouTube immediately.
-            val relayIntent = Intent(this, MainActivity::class.java).apply {
-                action = MainActivity.ACTION_OPEN_YOUTUBE
-                putExtra(MainActivity.EXTRA_VIDEO_URL, videoUrl)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            startActivity(relayIntent)
+        currentVideo.value = YoutubeVideo(videoId, title)
+        playerCommand.value = PlayerCommand.Play
+        log("loaded into embedded player: '$title' ($videoId) for query '$query'")
 
-            // ALSO post a tappable fallback notification every time, not
-            // just on failure -- Android gives no way to detect whether the
-            // direct launch above actually reached the screen or was
-            // silently dropped by the Background Activity Launch
-            // restriction (this happens specifically when another app, like
-            // YouTube itself, currently has focus -- intentional anti-
-            // hijack behavior, not something any app can fully bypass).
-            // Tapping a notification is always a direct user action, so
-            // this is a guaranteed way to actually reach the video.
-            postVideoReadyNotification(videoUrl, title)
-
-            log("playing real search result '$title' ($videoId) for query '$query'")
-            org.json.JSONObject().apply {
-                put("result", "opened")
-                put("video_url", videoUrl)
-                put("title", title)
-                put(
-                    "note",
-                    "A 'Tap to play' notification was also posted as a backup -- " +
-                        "mention it briefly in case the app couldn't switch to " +
-                        "YouTube automatically (e.g. the user is currently inside " +
-                        "another app).",
-                )
-            }
-        } catch (t: Throwable) {
-            log("play_youtube failed: ${t.javaClass.simpleName}: ${t.message}")
-            org.json.JSONObject().apply { put("error", "Failed to open video: ${t.message}") }
+        return org.json.JSONObject().apply {
+            put("result", "playing")
+            put("title", title)
         }
     }
 
@@ -367,18 +373,6 @@ class VoiceSessionService : Service() {
                     NotificationManager.IMPORTANCE_LOW, // low = no sound, still visible
                 )
             )
-            manager.createNotificationChannel(
-                NotificationChannel(
-                    VIDEO_READY_CHANNEL_ID,
-                    "Video ready to play",
-                    // HIGH so it shows as a heads-up banner even while
-                    // another app (like YouTube itself) has focus -- this is
-                    // the fallback for when Android's background-activity-
-                    // launch restriction blocks the app from auto-opening
-                    // YouTube directly (see dispatchVideoReadyNotification).
-                    NotificationManager.IMPORTANCE_HIGH,
-                )
-            )
         }
     }
 
@@ -414,34 +408,6 @@ class VoiceSessionService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
-    }
-
-    /** Guaranteed fallback for opening a video: a tappable, high-priority
-     *  notification the user can tap to actually open it when the direct
-     *  launch was silently blocked by Android's background-activity-launch
-     *  restriction (e.g. because YouTube itself currently has focus).
-     *  Tapping a notification is always counted as a direct user action, so
-     *  this is never subject to that restriction. */
-    private fun postVideoReadyNotification(videoUrl: String, title: String) {
-        val relayIntent = Intent(this, MainActivity::class.java).apply {
-            action = MainActivity.ACTION_OPEN_YOUTUBE
-            putExtra(MainActivity.EXTRA_VIDEO_URL, videoUrl)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        val pendingIntent = PendingIntent.getActivity(
-            this, videoUrl.hashCode(), relayIntent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-        val notification = NotificationCompat.Builder(this, VIDEO_READY_CHANNEL_ID)
-            .setContentTitle("Tap to play")
-            .setContentText(title.ifBlank { "Video ready" })
-            .setSmallIcon(R.drawable.ic_notification_mic)
-            .setContentIntent(pendingIntent)
-            .setAutoCancel(true)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .build()
-        val manager = getSystemService(NotificationManager::class.java)
-        runCatching { manager.notify(VIDEO_READY_NOTIFICATION_ID, notification) }
     }
 
     private fun updateNotification(statusText: String) {

@@ -140,17 +140,22 @@ class GeminiLiveClient(
                     // search query and the APP performs a real YouTube Data
                     // API v3 search itself to resolve the exact video --
                     // guaranteed real playback, never a hallucinated video.
+                    // Videos play in the app's OWN embedded player (Option C:
+                    // WebView + YouTube IFrame API), not the external
+                    // YouTube app, which is why pause/resume/close are real,
+                    // reliable controls here (no cross-app hand-off at all).
                     JSONObject().put("functionDeclarations", JSONArray(listOf(
                         JSONObject().apply {
                             put("name", "play_youtube")
                             put(
                                 "description",
-                                "Plays a YouTube video for the user by searching YouTube " +
-                                    "for the given query and opening the top real result " +
-                                    "in the YouTube app. Pass the user's request as a " +
-                                    "natural search query (e.g. 'Dune Part Two official " +
-                                    "trailer', 'lo-fi study music') -- do not try to guess " +
-                                    "a video URL or ID yourself.",
+                                "Plays a YouTube video for the user in an embedded " +
+                                    "in-app player by searching YouTube for the given " +
+                                    "query and loading the top real result. Pass the " +
+                                    "user's request as a natural search query (e.g. " +
+                                    "'Dune Part Two official trailer', 'lo-fi study " +
+                                    "music') -- do not try to guess a video URL or ID " +
+                                    "yourself.",
                             )
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -162,6 +167,21 @@ class GeminiLiveClient(
                                 })
                                 put("required", JSONArray(listOf("query")))
                             })
+                        },
+                        JSONObject().apply {
+                            put("name", "pause_youtube")
+                            put("description", "Pauses the video currently playing in the embedded player.")
+                            put("parameters", JSONObject().apply { put("type", "OBJECT") })
+                        },
+                        JSONObject().apply {
+                            put("name", "resume_youtube")
+                            put("description", "Resumes/plays the video currently loaded in the embedded player.")
+                            put("parameters", JSONObject().apply { put("type", "OBJECT") })
+                        },
+                        JSONObject().apply {
+                            put("name", "close_youtube")
+                            put("description", "Closes the embedded YouTube player.")
+                            put("parameters", JSONObject().apply { put("type", "OBJECT") })
                         },
                     ))),
                 )))
