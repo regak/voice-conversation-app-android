@@ -392,14 +392,12 @@ class VoiceSessionService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        // Restore state that should survive the app being fully closed
-        // (not just a network drop, which GeminiLiveClient's in-memory
-        // sessionResumption already covers) -- a fresh Service instance is
-        // created here exactly when the whole process had been killed, so
-        // this is the right place to reload from disk.
-        lastResumeHandle = ConversationPersistence.loadResumeHandle(applicationContext)
-        if (transcript.isEmpty()) {
-            ConversationPersistence.loadTranscript(applicationContext).forEach { (isModel, text) ->
+        // Load the currently-selected session (or create a new one if none exists).
+        val session = SessionManager.getCurrent(applicationContext)
+            ?: SessionManager.newSession(applicationContext)
+        lastResumeHandle = session.resumeHandle
+        if (transcript.isEmpty() && session.transcript.isNotEmpty()) {
+            session.transcript.forEach { (isModel, text) ->
                 transcript.add(TranscriptLine(isModel).apply { this.text = text })
             }
         }
@@ -461,13 +459,14 @@ class VoiceSessionService : Service() {
 
     private fun closeOpenTranscriptLine() {
         openTranscriptLine = null
-        // Persist on every closed line (not every delta) -- cheap enough
-        // at conversation-turn frequency, and means a killed process never
-        // loses more than the currently-in-progress line.
-        ConversationPersistence.saveTranscript(
-            applicationContext,
-            transcript.map { it.isModel to it.text },
-        )
+        // Persist to the current session
+        val currentId = SessionManager.getCurrentId(applicationContext)
+        currentId?.let { id ->
+            SessionManager.loadAll(applicationContext).firstOrNull { it.id == id }?.let { session ->
+                val updated = session.copy(transcript = transcript.map { it.isModel to it.text })
+                SessionManager.updateSession(applicationContext, updated)
+            }
+        }
     }
 
     /** Dispatches a parsed tool call to a real native action and reports the
@@ -697,8 +696,15 @@ class VoiceSessionService : Service() {
                         is GeminiLiveClient.Event.SessionResumptionUpdate -> {
                             if (event.resumable) {
                                 lastResumeHandle = event.handle
-                                ConversationPersistence.saveResumeHandle(applicationContext, event.handle)
-                                log("got resumable session handle (context now preserved across reconnects AND app restarts)")
+                                // Persist to the current session
+                                val currentId = SessionManager.getCurrentId(applicationContext)
+                                currentId?.let { id ->
+                                    SessionManager.loadAll(applicationContext).firstOrNull { it.id == id }?.let { session ->
+                                        val updated = session.copy(resumeHandle = event.handle)
+                                        SessionManager.updateSession(applicationContext, updated)
+                                    }
+                                }
+                                log("got resumable session handle (saved to current session)")
                             }
                         }
                     }
