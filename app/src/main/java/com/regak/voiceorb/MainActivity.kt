@@ -54,11 +54,18 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: VoiceSessionViewModel by viewModels()
 
-    private val requestMicPermission = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) viewModel.start(BuildConfig.GEMINI_API_KEY)
-        else viewModel.lastError.value = "Microphone permission denied"
+    private val requestPermissions = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        val micGranted = results[Manifest.permission.RECORD_AUDIO] == true
+        if (micGranted) {
+            viewModel.start(BuildConfig.GEMINI_API_KEY)
+        } else {
+            viewModel.lastError.value = "Microphone permission denied"
+        }
+        // POST_NOTIFICATIONS denial is non-fatal -- the foreground service
+        // (and its mic access) still works, the status notification just
+        // won't be visible.
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -110,18 +117,29 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startWithPermissionCheck() {
-        val granted = ContextCompat.checkSelfPermission(
+        val micGranted = ContextCompat.checkSelfPermission(
             this, Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
-        if (granted) {
+        val notificationsGranted = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+
+        if (micGranted && notificationsGranted) {
             viewModel.start(BuildConfig.GEMINI_API_KEY)
         } else {
-            requestMicPermission.launch(Manifest.permission.RECORD_AUDIO)
+            val toRequest = mutableListOf<String>()
+            if (!micGranted) toRequest.add(Manifest.permission.RECORD_AUDIO)
+            if (!notificationsGranted) toRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+            requestPermissions.launch(toRequest.toTypedArray())
         }
     }
 
     override fun onDestroy() {
-        viewModel.stop()
+        // Deliberately NOT calling viewModel.stop() here. The whole point of
+        // the foreground service is that the voice session survives the
+        // Activity being destroyed (e.g. Android reclaiming it under memory
+        // pressure while the user is in another app) -- only an explicit
+        // end action (the black button, or the notification's "End
+        // conversation") should stop the session.
         super.onDestroy()
     }
 }
