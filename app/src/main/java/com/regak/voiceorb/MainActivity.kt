@@ -262,10 +262,9 @@ fun VoiceOrbScreen(
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.White),
+            ModalDrawerSheet(
+                modifier = Modifier.width(300.dp),
+                drawerContainerColor = Color.White,
             ) {
                 Column(
                     modifier = Modifier
@@ -738,42 +737,24 @@ private fun formatRelativeTime(timestamp: Long): String {
 }
 
 private fun switchToSession(context: android.content.Context, sessionId: String) {
-    val stopIntent = android.content.Intent(context, VoiceSessionService::class.java).apply {
-        action = VoiceSessionService.ACTION_STOP
-    }
-    context.startService(stopIntent)
-
     SessionManager.setCurrentId(context, sessionId)
-
-    val session = SessionManager.loadAll(context).firstOrNull { it.id == sessionId }
-    if (session != null) {
-        VoiceSessionService.transcript.clear()
-        session.transcript.forEach { (isModel, text) ->
-            VoiceSessionService.transcript.add(TranscriptLine(isModel).apply { this.text = text })
-        }
-        val startIntent = android.content.Intent(context, VoiceSessionService::class.java).apply {
-            action = VoiceSessionService.ACTION_START
-            putExtra(VoiceSessionService.EXTRA_API_KEY, BuildConfig.GEMINI_API_KEY)
-        }
-        androidx.core.content.ContextCompat.startForegroundService(context, startIntent)
+    val switchIntent = android.content.Intent(context, VoiceSessionService::class.java).apply {
+        action = VoiceSessionService.ACTION_SWITCH_SESSION
+        putExtra(VoiceSessionService.EXTRA_SESSION_ID, sessionId)
+        putExtra(VoiceSessionService.EXTRA_API_KEY, BuildConfig.GEMINI_API_KEY)
     }
+    androidx.core.content.ContextCompat.startForegroundService(context, switchIntent)
 }
 
 private fun newSession(context: android.content.Context) {
-    val stopIntent = android.content.Intent(context, VoiceSessionService::class.java).apply {
-        action = VoiceSessionService.ACTION_STOP
-    }
-    context.startService(stopIntent)
-
     val session = SessionManager.newSession(context)
     SessionManager.setCurrentId(context, session.id)
-    VoiceSessionService.transcript.clear()
-
-    val startIntent = android.content.Intent(context, VoiceSessionService::class.java).apply {
-        action = VoiceSessionService.ACTION_START
+    val switchIntent = android.content.Intent(context, VoiceSessionService::class.java).apply {
+        action = VoiceSessionService.ACTION_SWITCH_SESSION
+        putExtra(VoiceSessionService.EXTRA_SESSION_ID, session.id)
         putExtra(VoiceSessionService.EXTRA_API_KEY, BuildConfig.GEMINI_API_KEY)
     }
-    androidx.core.content.ContextCompat.startForegroundService(context, startIntent)
+    androidx.core.content.ContextCompat.startForegroundService(context, switchIntent)
 }
 
 private fun deleteSession(context: android.content.Context, sessionId: String) {
@@ -782,17 +763,11 @@ private fun deleteSession(context: android.content.Context, sessionId: String) {
 
     if (wasCurrent) {
         val nextId = SessionManager.getCurrentId(context)
-        VoiceSessionService.transcript.clear()
-        if (nextId != null) {
-            val next = SessionManager.loadAll(context).firstOrNull { it.id == nextId }
-            next?.transcript?.forEach { (isModel, text) ->
-                VoiceSessionService.transcript.add(TranscriptLine(isModel).apply { this.text = text })
-            }
-            val startIntent = android.content.Intent(context, VoiceSessionService::class.java).apply {
-                action = VoiceSessionService.ACTION_START
-                putExtra(VoiceSessionService.EXTRA_API_KEY, BuildConfig.GEMINI_API_KEY)
-            }
-            androidx.core.content.ContextCompat.startForegroundService(context, startIntent)
+        val switchIntent = android.content.Intent(context, VoiceSessionService::class.java).apply {
+            action = VoiceSessionService.ACTION_SWITCH_SESSION
+            putExtra(VoiceSessionService.EXTRA_SESSION_ID, nextId)
+            putExtra(VoiceSessionService.EXTRA_API_KEY, BuildConfig.GEMINI_API_KEY)
         }
+        androidx.core.content.ContextCompat.startForegroundService(context, switchIntent)
     }
 }

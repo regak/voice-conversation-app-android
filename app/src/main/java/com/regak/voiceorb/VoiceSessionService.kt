@@ -48,9 +48,11 @@ class VoiceSessionService : Service() {
 
         const val ACTION_START = "com.regak.voiceorb.action.START"
         const val ACTION_STOP = "com.regak.voiceorb.action.STOP"
+        const val ACTION_SWITCH_SESSION = "com.regak.voiceorb.action.SWITCH_SESSION"
         const val ACTION_SET_MUTED = "com.regak.voiceorb.action.SET_MUTED"
         const val EXTRA_API_KEY = "api_key"
         const val EXTRA_MUTED = "muted"
+        const val EXTRA_SESSION_ID = "session_id"
 
         // Shared Compose state -- the Activity reads these directly, the
         // Service writes to them. This replaces the old ViewModel-owned
@@ -416,6 +418,34 @@ class VoiceSessionService : Service() {
                 stopSession()
                 ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
                 stopSelf()
+            }
+            // Switches to a different saved session (or a brand-new one) in a
+            // SINGLE onStartCommand call. Deliberately not split into a
+            // separate STOP intent followed by a separate START intent from
+            // the caller: two separate startService()/startForegroundService()
+            // calls race against each other (the old instance can call
+            // stopSelf() right as the new start command arrives), which is
+            // exactly what caused a real
+            // ForegroundServiceDidNotStartInTimeException crash in testing.
+            // Doing stop+reload+start synchronously inside one command avoids
+            // that race entirely and guarantees startForeground() is (re)called
+            // well within the 5s window.
+            ACTION_SWITCH_SESSION -> {
+                stopSession()
+                val sessionId = intent.getStringExtra(EXTRA_SESSION_ID)
+                val session = if (sessionId != null) {
+                    SessionManager.loadAll(applicationContext).firstOrNull { it.id == sessionId }
+                } else {
+                    null
+                }
+                transcript.clear()
+                session?.transcript?.forEach { (isModel, text) ->
+                    transcript.add(TranscriptLine(isModel).apply { this.text = text })
+                }
+                lastResumeHandle = session?.resumeHandle
+                val apiKey = intent.getStringExtra(EXTRA_API_KEY).orEmpty()
+                startForegroundNotification()
+                startSession(apiKey)
             }
             ACTION_SET_MUTED -> {
                 muted = intent.getBooleanExtra(EXTRA_MUTED, false)
