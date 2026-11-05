@@ -299,10 +299,11 @@ fun VoiceOrbScreen(
                     command = playerCommand,
                     error = playerError,
                     onCommandConsumed = { VoiceSessionService.playerCommand.value = null },
-                    onError = { VoiceSessionService.playerError.value = it },
+                    onError = { VoiceSessionService.onEmbeddedPlayerError(it) },
                     onClose = {
                         VoiceSessionService.currentVideo.value = null
                         VoiceSessionService.playerError.value = null
+                        VoiceSessionService.videoQueue.value = emptyList()
                     },
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
                 )

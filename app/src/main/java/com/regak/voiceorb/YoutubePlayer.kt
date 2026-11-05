@@ -71,7 +71,7 @@ fun EmbeddedYoutubePlayer(
     command: PlayerCommand?,
     error: String?,
     onCommandConsumed: () -> Unit,
-    onError: (String?) -> Unit,
+    onError: (String) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {

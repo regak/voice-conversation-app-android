@@ -88,6 +88,26 @@ class VoiceSessionService : Service() {
         // video restriction is YouTube's own policy and not something any
         // app can legitimately bypass.
         val playerError = mutableStateOf<String?>(null)
+        // Remaining fallback candidates for the current query, used by
+        // onEmbeddedPlayerError() below.
+        val videoQueue = mutableStateOf<List<YoutubeVideo>>(emptyList())
+
+        /** Called by the embedded player's JS error bridge. Tries the next
+         *  search candidate automatically (YouTube's "embeddable" API flag
+         *  is not always accurate, e.g. for live/premiere streams) instead
+         *  of dead-ending on a single broken video; only shows the
+         *  "Open in YouTube app" fallback once every candidate has failed. */
+        fun onEmbeddedPlayerError(message: String) {
+            val queue = videoQueue.value
+            if (queue.isNotEmpty()) {
+                currentVideo.value = queue.first()
+                videoQueue.value = queue.drop(1)
+                playerError.value = null
+                playerCommand.value = PlayerCommand.Play
+            } else {
+                playerError.value = message
+            }
+        }
     }
 
     private var client: GeminiLiveClient? = null
@@ -226,17 +246,23 @@ class VoiceSessionService : Service() {
             return org.json.JSONObject().apply { put("error", "No YouTube API key configured") }
         }
 
-        val searchResult = runCatching { searchYoutube(query, apiKey) }.getOrElse { t ->
+        val searchResults = runCatching { searchYoutube(query, apiKey) }.getOrElse { t ->
             log("YouTube search failed: ${t.javaClass.simpleName}: ${t.message}")
             return org.json.JSONObject().apply { put("error", "YouTube search failed: ${t.message}") }
         }
-        if (searchResult == null) {
+        if (searchResults.isEmpty()) {
             return org.json.JSONObject().apply { put("error", "No YouTube results found for '$query'") }
         }
-        val (videoId, title) = searchResult
+        val (videoId, title) = searchResults.first()
 
         playerError.value = null
         currentVideo.value = YoutubeVideo(videoId, title)
+        // Keep the rest of the matches as fallback candidates: YouTube's
+        // Data API "embeddable" flag can be wrong for some content (e.g.
+        // live/premiere streams), so if the embedded player still reports
+        // an error at runtime, onEmbeddedPlayerError() below tries the
+        // next one automatically instead of dead-ending on one video.
+        videoQueue.value = searchResults.drop(1).map { (id, t2) -> YoutubeVideo(id, t2) }
         playerCommand.value = PlayerCommand.Play
         log("loaded into embedded player: '$title' ($videoId) for query '$query'")
 
@@ -257,7 +283,7 @@ class VoiceSessionService : Service() {
      *  first embeddable match, or null if none of the top candidates allow
      *  embedding. Runs on Dispatchers.IO (blocking calls), never the main
      *  thread. */
-    private fun searchYoutube(query: String, apiKey: String): Pair<String, String>? {
+    private fun searchYoutube(query: String, apiKey: String): List<Pair<String, String>> {
         val searchUrl = "https://www.googleapis.com/youtube/v3/search".toHttpUrl().newBuilder()
             .addQueryParameter("part", "snippet")
             .addQueryParameter("q", query)
@@ -271,7 +297,7 @@ class VoiceSessionService : Service() {
                 if (!response.isSuccessful) {
                     throw java.io.IOException("YouTube search API returned HTTP ${response.code}: ${response.body?.string()?.take(300)}")
                 }
-                val items = org.json.JSONObject(response.body?.string() ?: return null).optJSONArray("items") ?: return null
+                val items = org.json.JSONObject(response.body?.string() ?: return emptyList()).optJSONArray("items") ?: return emptyList()
                 for (i in 0 until items.length()) {
                     val item = items.getJSONObject(i)
                     val videoId = item.getJSONObject("id").optString("videoId")
@@ -280,7 +306,7 @@ class VoiceSessionService : Service() {
                 }
             }
         }
-        if (candidates.isEmpty()) return null
+        if (candidates.isEmpty()) return emptyList()
 
         val statusUrl = "https://www.googleapis.com/youtube/v3/videos".toHttpUrl().newBuilder()
             .addQueryParameter("part", "status")
@@ -307,9 +333,8 @@ class VoiceSessionService : Service() {
             }
         }
 
-        val chosenId = candidates.keys.firstOrNull { embeddableIds.contains(it) || embeddableIds.isEmpty() }
-            ?: return null
-        return chosenId to (candidates[chosenId] ?: "")
+        val chosenIds = if (embeddableIds.isEmpty()) candidates.keys else candidates.keys.filter { embeddableIds.contains(it) }
+        return chosenIds.map { it to (candidates[it] ?: "") }
     }
 
     private fun startSession(apiKeyValue: String) {
