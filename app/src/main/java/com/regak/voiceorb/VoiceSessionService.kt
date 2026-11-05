@@ -213,6 +213,42 @@ class VoiceSessionService : Service() {
             }
         }
 
+        /** Sends a brand-new SMS to a contact name or raw phone number --
+         *  unlike sendWhatsAppReply/sendSmsReply, this doesn't need a prior
+         *  incoming message to target; the user names who to text. */
+        fun sendNewSms(context: android.content.Context, recipient: String, message: String): org.json.JSONObject {
+            if (message.isBlank()) {
+                return org.json.JSONObject().apply { put("error", "message was missing or blank") }
+            }
+            if (recipient.isBlank()) {
+                return org.json.JSONObject().apply { put("error", "recipient was missing or blank") }
+            }
+            // A phone-number-looking recipient is used directly; otherwise
+            // treat it as a contact name to resolve.
+            val looksLikeNumber = recipient.any { it.isDigit() } && recipient.count { it.isDigit() } >= 6
+            val phoneNumber = if (looksLikeNumber) {
+                recipient
+            } else {
+                resolveContactNumbers(context, recipient).firstOrNull()
+                    ?: return org.json.JSONObject().apply { put("error", "No contact found matching '$recipient'") }
+            }
+
+            return try {
+                val smsManager = if (android.os.Build.VERSION.SDK_INT >= 31) {
+                    context.getSystemService(android.telephony.SmsManager::class.java)
+                } else {
+                    @Suppress("DEPRECATION") android.telephony.SmsManager.getDefault()
+                }
+                smsManager.sendTextMessage(phoneNumber, null, message, null, null)
+                org.json.JSONObject().apply {
+                    put("result", "sent")
+                    put("to", recipient)
+                }
+            } catch (t: Throwable) {
+                org.json.JSONObject().apply { put("error", "Failed to send SMS: ${t.message}") }
+            }
+        }
+
         /** Queries the real on-device SMS history (content://sms), not
          *  just new arrivals -- for "read my messages from Mom today" /
          *  "any unread SMS?" style requests. contactHint is resolved
@@ -345,6 +381,12 @@ class VoiceSessionService : Service() {
     private var reconnectJob: Job? = null
     private var lastApiKey: String = ""
     private var reconnectAttempts: Int = 0
+    // Latest resumable session handle (see GeminiLiveClient's
+    // sessionResumption docs) -- carried into every new GeminiLiveClient
+    // we create, whether from an auto-reconnect after a network drop or a
+    // deliberate stop/start, so the model keeps full context instead of
+    // "forgetting everything" the way a brand-new session would.
+    private var lastResumeHandle: String? = null
     private val serviceScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
 
     override fun onCreate() {
@@ -435,6 +477,12 @@ class VoiceSessionService : Service() {
                 val message = call.args.optString("message")
                 val recipientHint = call.args.optString("recipient_hint")
                 val result = sendSmsReply(applicationContext, message, recipientHint)
+                if (call.id.isNotEmpty()) client.sendToolResponse(call.id, result)
+            }
+            "send_sms" -> {
+                val recipient = call.args.optString("recipient")
+                val message = call.args.optString("message")
+                val result = sendNewSms(applicationContext, recipient, message)
                 if (call.id.isNotEmpty()) client.sendToolResponse(call.id, result)
             }
             "query_sms" -> {
@@ -569,7 +617,7 @@ class VoiceSessionService : Service() {
         )
         audioEngine = engine
 
-        val gemini = GeminiLiveClient(apiKey = apiKeyValue)
+        val gemini = GeminiLiveClient(apiKey = apiKeyValue, resumeHandle = lastResumeHandle)
         client = gemini
 
         val exceptionHandler = CoroutineExceptionHandler { _, t ->
@@ -627,6 +675,12 @@ class VoiceSessionService : Service() {
                         is GeminiLiveClient.Event.Closed -> {
                             log("closed: ${event.reason}")
                             orbState.value = OrbState.IDLE
+                        }
+                        is GeminiLiveClient.Event.SessionResumptionUpdate -> {
+                            if (event.resumable) {
+                                lastResumeHandle = event.handle
+                                log("got resumable session handle (context now preserved across reconnects)")
+                            }
                         }
                     }
                 } catch (t: CancellationException) {
