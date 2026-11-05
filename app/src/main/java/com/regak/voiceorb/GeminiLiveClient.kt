@@ -199,6 +199,19 @@ class GeminiLiveClient(
                                         put("type", "STRING")
                                         put("description", "Natural-language search query describing the video to play.")
                                     })
+                                    put("is_live", JSONObject().apply {
+                                        put("type", "BOOLEAN")
+                                        put(
+                                            "description",
+                                            "Set true ONLY if the user explicitly wants a LIVE " +
+                                                "broadcast happening right now (e.g. 'is X live', " +
+                                                "'play the live stream', 'watch the live service " +
+                                                "now'). This filters the search to currently-live " +
+                                                "broadcasts only, so don't set it for ordinary " +
+                                                "videos, replays, or when the user didn't ask for " +
+                                                "something live.",
+                                        )
+                                    })
                                 })
                                 put("required", JSONArray(listOf("query")))
                             })

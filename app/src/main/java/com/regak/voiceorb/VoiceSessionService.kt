@@ -597,17 +597,24 @@ class VoiceSessionService : Service() {
         if (query.isBlank()) {
             return org.json.JSONObject().apply { put("error", "query was missing or blank") }
         }
+        val isLive = args.optBoolean("is_live", false)
         val apiKey = BuildConfig.YOUTUBE_API_KEY
         if (apiKey.isBlank()) {
             return org.json.JSONObject().apply { put("error", "No YouTube API key configured") }
         }
 
-        val searchResult = runCatching { searchYoutube(query, apiKey) }.getOrElse { t ->
+        val searchResult = runCatching { searchYoutube(query, apiKey, isLive) }.getOrElse { t ->
             log("YouTube search failed: ${t.javaClass.simpleName}: ${t.message}")
             return org.json.JSONObject().apply { put("error", "YouTube search failed: ${t.message}") }
         }
         if (searchResult == null) {
-            return org.json.JSONObject().apply { put("error", "No YouTube results found for '$query'") }
+            val msg = if (isLive) {
+                "No live stream currently found for '$query'. Try again without " +
+                    "requiring live, in case it's not actually live right now."
+            } else {
+                "No YouTube results found for '$query'"
+            }
+            return org.json.JSONObject().apply { put("error", msg) }
         }
         val (videoId, title) = searchResult
         val videoUrl = "https://www.youtube.com/watch?v=$videoId"
@@ -643,17 +650,33 @@ class VoiceSessionService : Service() {
     private val httpClient = okhttp3.OkHttpClient()
 
     /** Real YouTube Data API v3 search -- returns (videoId, title) of the
-     *  top result, or null if nothing matched. Runs on Dispatchers.IO
-     *  (blocking call), never the main thread. */
-    private fun searchYoutube(query: String, key: String): Pair<String, String>? {
-        val url = "https://www.googleapis.com/youtube/v3/search".toHttpUrl().newBuilder()
+     *  best matching result, or null if nothing matched. Runs on
+     *  Dispatchers.IO (blocking call), never the main thread.
+     *
+     *  Two real bugs this fixes vs. the original maxResults=1 version,
+     *  both confirmed directly against the live YouTube Data API:
+     *  1. The API can return a CHANNEL result ("kind": "youtube#channel")
+     *     ranked #1 even with type=video set (a known API quirk, not
+     *     something we can prevent via query params) -- picking a plain
+     *     top-1 result then silently failed with an empty videoId. Now
+     *     fetches several candidates and skips anything that isn't an
+     *     actual "youtube#video" kind.
+     *  2. "is it live right now" requests need eventType=live passed to
+     *     the API -- a plain keyword search ranks by general relevance
+     *     and can easily miss an actively-live broadcast whose title
+     *     doesn't happen to rank it first. */
+    private fun searchYoutube(query: String, key: String, live: Boolean): Pair<String, String>? {
+        val urlBuilder = "https://www.googleapis.com/youtube/v3/search".toHttpUrl().newBuilder()
             .addQueryParameter("part", "snippet")
             .addQueryParameter("q", query)
             .addQueryParameter("type", "video")
-            .addQueryParameter("maxResults", "1")
+            .addQueryParameter("maxResults", "8")
             .addQueryParameter("key", key)
-            .build()
-        val request = okhttp3.Request.Builder().url(url).build()
+        if (live) {
+            urlBuilder.addQueryParameter("eventType", "live")
+            urlBuilder.addQueryParameter("order", "date")
+        }
+        val request = okhttp3.Request.Builder().url(urlBuilder.build()).build()
         httpClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 throw java.io.IOException("YouTube API returned HTTP ${response.code}: ${response.body?.string()?.take(300)}")
@@ -661,12 +684,16 @@ class VoiceSessionService : Service() {
             val body = response.body?.string() ?: return null
             val json = org.json.JSONObject(body)
             val items = json.optJSONArray("items") ?: return null
-            if (items.length() == 0) return null
-            val first = items.getJSONObject(0)
-            val videoId = first.getJSONObject("id").optString("videoId")
-            val title = first.getJSONObject("snippet").optString("title")
-            if (videoId.isBlank()) return null
-            return videoId to title
+            for (i in 0 until items.length()) {
+                val item = items.getJSONObject(i)
+                val idObj = item.getJSONObject("id")
+                if (idObj.optString("kind") != "youtube#video") continue // skip channel/playlist results
+                val videoId = idObj.optString("videoId")
+                if (videoId.isBlank()) continue
+                val title = item.getJSONObject("snippet").optString("title")
+                return videoId to title
+            }
+            return null
         }
     }
 
