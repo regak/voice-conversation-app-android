@@ -233,6 +233,46 @@ fun VoiceOrbScreen(
                 modifier = Modifier.padding(horizontal = 20.dp),
             )
 
+            // Driving mode: while on, new WhatsApp messages are announced
+            // into the live conversation and can be replied to by voice.
+            // Requires "Notification access" (a special, manually-granted
+            // permission -- there is no runtime dialog for it), so the
+            // toggle deep-links to system Settings the first time if it
+            // isn't granted yet rather than silently doing nothing.
+            val drivingMode by VoiceSessionService.drivingMode
+            val context = androidx.compose.ui.platform.LocalContext.current
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column {
+                    Text("Driving mode", color = Color.White, fontSize = 13.sp)
+                    Text(
+                        "Reads WhatsApp messages aloud, reply by voice",
+                        color = Color(0xFF9AA0A6),
+                        fontSize = 10.sp,
+                    )
+                }
+                Switch(
+                    checked = drivingMode,
+                    onCheckedChange = { wantsOn ->
+                        if (wantsOn && !WhatsAppNotificationListener.isEnabled(context)) {
+                            viewModel.lastError.value =
+                                "Grant 'Notification access' for Voice Orb in the screen " +
+                                    "that just opened, then turn Driving mode on again."
+                            context.startActivity(
+                                android.content.Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS),
+                            )
+                        } else {
+                            VoiceSessionService.drivingMode.value = wantsOn
+                        }
+                    },
+                )
+            }
+
             // Full scrollable conversation history, ChatGPT-conversation-mode
             // style (both sides retained, not just the last exchange).
             val listState = rememberLazyListState()

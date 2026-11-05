@@ -163,6 +163,39 @@ class GeminiLiveClient(
                                 put("required", JSONArray(listOf("query")))
                             })
                         },
+                        JSONObject().apply {
+                            put("name", "reply_whatsapp")
+                            put(
+                                "description",
+                                "Sends a WhatsApp reply to a conversation that just " +
+                                    "sent a new message (announced to you via a SYSTEM " +
+                                    "NOTICE). Use this when the user says what they want " +
+                                    "to reply, e.g. 'tell her I'll be there by 8'. Draft " +
+                                    "the actual message text yourself from what the user " +
+                                    "said -- don't just repeat their instruction verbatim " +
+                                    "unless that IS the message.",
+                            )
+                            put("parameters", JSONObject().apply {
+                                put("type", "OBJECT")
+                                put("properties", JSONObject().apply {
+                                    put("message", JSONObject().apply {
+                                        put("type", "STRING")
+                                        put("description", "The reply message text to send, drafted from what the user said.")
+                                    })
+                                    put("recipient_hint", JSONObject().apply {
+                                        put("type", "STRING")
+                                        put(
+                                            "description",
+                                            "Optional: the name of the person/group to reply " +
+                                                "to, if there might be more than one pending " +
+                                                "WhatsApp conversation. Omit to reply to the " +
+                                                "most recently announced one.",
+                                        )
+                                    })
+                                })
+                                put("required", JSONArray(listOf("message")))
+                            })
+                        },
                     ))),
                 )))
             })
@@ -292,6 +325,28 @@ class GeminiLiveClient(
                     put("id", functionId)
                     put("response", response)
                 })))
+            })
+        }
+        webSocket?.send(msg.toString())
+    }
+
+    /** Injects a synthetic "user" turn carrying text instead of mic audio --
+     *  used to announce events the model should react to out loud (e.g. a
+     *  new WhatsApp message arriving) without the user actually having
+     *  said anything. The Live API's wire protocol has no separate
+     *  "system" turn role mid-stream, so the injected text itself makes
+     *  clear it's a system notice, not the user speaking, to avoid the
+     *  model treating it as a literal user utterance. */
+    fun sendUserTextTurn(text: String) {
+        val msg = JSONObject().apply {
+            put("clientContent", JSONObject().apply {
+                put("turns", JSONArray(listOf(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray(listOf(JSONObject().apply {
+                        put("text", text)
+                    })))
+                })))
+                put("turnComplete", true)
             })
         }
         webSocket?.send(msg.toString())

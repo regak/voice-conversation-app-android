@@ -60,6 +60,89 @@ class VoiceSessionService : Service() {
         val transcript = mutableStateListOf<TranscriptLine>()
         val debugLog = mutableStateListOf<String>()
         val lastError = mutableStateOf<String?>(null)
+
+        // Driving mode (WhatsApp hands-free read + reply): see
+        // onWhatsAppMessage() below for the full flow.
+        val drivingMode = mutableStateOf(false)
+        // New-message notices queued here until a live Gemini session with
+        // setupComplete acknowledged exists to actually speak them --
+        // companion-level (not tied to one service instance) since a
+        // WhatsApp notification can arrive before the service has even
+        // been created yet.
+        private val pendingAnnouncements = mutableListOf<String>()
+        // Set by the running instance once its session's setupComplete
+        // arrives; cleared on stop. Companion-level by the same pattern as
+        // orbState/transcript above.
+        private var liveClient: GeminiLiveClient? = null
+
+        /** Called by WhatsAppNotificationListener for every new WhatsApp
+         *  message while driving mode is on. Announces it into the live
+         *  voice conversation (auto-starting a session with the app's own
+         *  Gemini key if none is running yet) so the user hears it read
+         *  aloud and can simply reply by talking -- the model will call
+         *  reply_whatsapp with the drafted text. */
+        fun onWhatsAppMessage(context: android.content.Context, senderName: String, messageText: String) {
+            if (!drivingMode.value) return
+            val notice = "[SYSTEM NOTICE -- not something the user said. A new " +
+                "WhatsApp message just arrived while the user is driving. Tell " +
+                "the user about it naturally and briefly, then ask if they want " +
+                "to reply.] New WhatsApp message from $senderName: \"$messageText\""
+            synchronized(pendingAnnouncements) { pendingAnnouncements.add(notice) }
+
+            val startIntent = Intent(context, VoiceSessionService::class.java).apply {
+                action = ACTION_START
+                putExtra(EXTRA_API_KEY, BuildConfig.GEMINI_API_KEY)
+            }
+            androidx.core.content.ContextCompat.startForegroundService(context, startIntent)
+            flushPendingAnnouncements()
+        }
+
+        /** Sends any queued WhatsApp announcements once the live session is
+         *  actually ready to speak (setupComplete acknowledged) -- called
+         *  both from onWhatsAppMessage() and from the SetupComplete handler
+         *  below, since whichever happens second is when it's safe. */
+        fun flushPendingAnnouncements() {
+            val c = liveClient ?: return
+            if (!c.setupAcked.get()) return
+            synchronized(pendingAnnouncements) {
+                pendingAnnouncements.forEach { c.sendUserTextTurn(it) }
+                pendingAnnouncements.clear()
+            }
+        }
+
+        /** Finds the most recent (optionally sender-matching) pending
+         *  WhatsApp conversation and fires its real reply RemoteInput
+         *  action -- the same mechanism Android Auto/Wear use, so this
+         *  sends exactly as WhatsApp's own quick-reply would, no UI
+         *  involved. */
+        fun sendWhatsAppReply(context: android.content.Context, message: String, recipientHint: String): org.json.JSONObject {
+            if (message.isBlank()) {
+                return org.json.JSONObject().apply { put("error", "message was missing or blank") }
+            }
+            val replies = WhatsAppNotificationListener.pendingReplies
+            val entry = synchronized(replies) {
+                if (recipientHint.isNotBlank()) {
+                    replies.entries.lastOrNull { it.value.senderName.contains(recipientHint, ignoreCase = true) }
+                } else {
+                    replies.entries.lastOrNull()
+                }
+            } ?: return org.json.JSONObject().apply { put("error", "No pending WhatsApp conversation to reply to") }
+
+            return try {
+                val resultsBundle = android.os.Bundle()
+                entry.value.remoteInputs.forEach { ri -> resultsBundle.putCharSequence(ri.resultKey, message) }
+                val fillInIntent = Intent()
+                android.app.RemoteInput.addResultsToIntent(entry.value.remoteInputs, fillInIntent, resultsBundle)
+                entry.value.replyAction.actionIntent.send(context, 0, fillInIntent)
+                synchronized(replies) { replies.remove(entry.key) }
+                org.json.JSONObject().apply {
+                    put("result", "sent")
+                    put("to", entry.value.senderName)
+                }
+            } catch (t: Throwable) {
+                org.json.JSONObject().apply { put("error", "Failed to send WhatsApp reply: ${t.message}") }
+            }
+        }
     }
 
     private var client: GeminiLiveClient? = null
@@ -149,6 +232,12 @@ class VoiceSessionService : Service() {
                     val result = handlePlayYoutube(call.args)
                     if (call.id.isNotEmpty()) client.sendToolResponse(call.id, result)
                 }
+            }
+            "reply_whatsapp" -> {
+                val message = call.args.optString("message")
+                val recipientHint = call.args.optString("recipient_hint")
+                val result = sendWhatsAppReply(applicationContext, message, recipientHint)
+                if (call.id.isNotEmpty()) client.sendToolResponse(call.id, result)
             }
             else -> respond(client, call, "error", "Unknown function: ${call.name}")
         }
@@ -288,6 +377,8 @@ class VoiceSessionService : Service() {
                         is GeminiLiveClient.Event.SetupComplete -> {
                             log("setupComplete received -- starting mic capture")
                             reconnectAttempts = 0 // connection is healthy again
+                            liveClient = gemini
+                            flushPendingAnnouncements()
                             orbState.value = OrbState.LISTENING
                             updateNotification("Listening...")
                             engine.startCapture()
@@ -356,6 +447,7 @@ class VoiceSessionService : Service() {
         runCatching { client?.close() }
         audioEngine = null
         client = null
+        liveClient = null
         openTranscriptLine = null
         lastError.value = null
         orbState.value = OrbState.IDLE
