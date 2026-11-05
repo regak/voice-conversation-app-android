@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Voice Orb — Release Timeline</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+
+  :root{
+    --bg: #0a0d12;
+    --panel: #11151c;
+    --panel-2: #141922;
+    --border: #1f2630;
+    --spine: #273240;
+    --ink: #e7ebf0;
+    --muted: #8a93a3;
+    --muted-2: #5c6676;
+    --accent: #35e0c0;
+    --accent-dim: rgba(53,224,192,0.12);
+    --feat: #35e0c0;
+    --fix: #e0a635;
+    --rev: #e0566b;
+    --mono: 'IBM Plex Mono', monospace;
+    --sans: 'IBM Plex Sans', sans-serif;
+    --head: 'Space Grotesk', sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background: var(--bg);
+    background-image:
+      radial-gradient(circle at 15% 0%, rgba(53,224,192,0.05), transparent 45%),
+      radial-gradient(circle at 100% 30%, rgba(224,86,107,0.04), transparent 40%);
+    color: var(--ink);
+    font-family: var(--sans);
+    padding: 44px 0 64px;
+  }
+  .wrap{ max-width: 980px; margin: 0 auto; padding: 0 40px; }
+
+  /* ---- Header ---- */
+  .topbar{
+    display:flex; justify-content:space-between; align-items:flex-start;
+    padding-bottom: 28px; border-bottom: 1px solid var(--border); margin-bottom: 32px;
+  }
+  .title-block h1{
+    font-family: var(--head); font-size: 28px; font-weight:700; margin:0 0 6px;
+    letter-spacing: -0.01em;
+  }
+  .title-block .sub{ color: var(--muted); font-size: 14px; }
+  .title-block .sub code{ color: var(--accent); font-family: var(--mono); background: var(--accent-dim); padding: 1px 6px; border-radius: 4px; }
+
+  .stats{ display:flex; gap: 22px; }
+  .stat{ text-align:right; }
+  .stat .num{ font-family: var(--head); font-size: 24px; font-weight:700; color: var(--ink); line-height:1; }
+  .stat .lbl{ font-size: 11px; color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.06em; margin-top:4px; }
+
+  /* ---- Legend ---- */
+  .legend{ display:flex; gap: 18px; margin-bottom: 36px; font-size: 12px; color: var(--muted); }
+  .legend .dot{ width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:6px; }
+
+  /* ---- Timeline ---- */
+  .timeline{ position: relative; padding-left: 28px; }
+  .timeline::before{
+    content:''; position:absolute; left: 5px; top: 6px; bottom: 6px; width: 2px;
+    background: linear-gradient(to bottom, var(--spine), var(--spine) 96%, transparent);
+  }
+
+  .phase{ margin-bottom: 36px; }
+  .phase-head{
+    position: relative; display:flex; align-items:baseline; gap: 12px; margin-bottom: 14px;
+  }
+  .phase-head::before{
+    content:''; position:absolute; left:-28px; top:4px; width:12px; height:12px;
+    border-radius:50%; background: var(--accent); box-shadow: 0 0 0 4px var(--bg), 0 0 0 5px var(--spine);
+  }
+  .phase-head h2{ font-family: var(--head); font-size: 17px; font-weight:600; margin:0; }
+  .phase-head .range{ font-family: var(--mono); font-size: 11.5px; color: var(--muted-2); }
+  .phase-desc{ font-size: 12.5px; color: var(--muted); margin: -8px 0 14px 0; max-width: 620px; }
+
+  .entries{ display:flex; flex-direction:column; gap:8px; }
+  .entry{
+    position: relative; display:grid; grid-template-columns: 96px 1fr 72px;
+    gap: 14px; align-items:center;
+    background: var(--panel); border:1px solid var(--border); border-radius: 8px;
+    padding: 10px 14px;
+  }
+  .entry::before{
+    content:''; position:absolute; left:-25.5px; top:50%; transform:translateY(-50%);
+    width:7px; height:7px; border-radius:50%; background: var(--muted-2);
+  }
+  .entry.feat::before{ background: var(--feat); }
+  .entry.fix::before{ background: var(--fix); }
+  .entry.rev::before{ background: var(--rev); }
+
+  .ver{ font-family: var(--mono); font-size: 13px; font-weight:600; color: var(--accent); }
+  .ver .vcode{ color: var(--muted-2); font-size:10.5px; display:block; margin-top:1px; font-weight:400; }
+
+  .desc{ font-size: 13px; line-height:1.4; color: var(--ink); }
+  .desc .tag{
+    font-family: var(--mono); font-size: 9.5px; font-weight:600; letter-spacing:0.04em;
+    padding: 1.5px 6px; border-radius: 4px; margin-right: 7px; vertical-align: 1px;
+    text-transform: uppercase;
+  }
+  .entry.feat .tag{ background: rgba(53,224,192,0.14); color: var(--feat); }
+  .entry.fix .tag{ background: rgba(224,166,53,0.14); color: var(--fix); }
+  .entry.rev .tag{ background: rgba(224,86,107,0.14); color: var(--rev); }
+
+  .time{ font-family: var(--mono); font-size: 11px; color: var(--muted-2); text-align:right; }
+
+  /* ---- Footer ---- */
+  .footer{
+    margin-top: 40px; padding-top: 24px; border-top: 1px solid var(--border);
+    display:grid; grid-template-columns: 1.3fr 1fr; gap: 32px;
+  }
+  .footer h3{ font-family: var(--head); font-size: 13px; margin:0 0 10px; color: var(--ink); }
+  .footer p{ font-size: 12.5px; color: var(--muted); line-height:1.6; margin:0 0 8px; }
+  .footer .milestones{ list-style:none; margin:0; padding:0; font-size:12.5px; color:var(--muted); }
+  .footer .milestones li{ display:flex; justify-content:space-between; padding: 5px 0; border-bottom: 1px dashed var(--border); }
+  .footer .milestones li span.v{ font-family: var(--mono); color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <div class="title-block">
+      <h1>Voice Orb — Release Timeline</h1>
+      <div class="sub">regak/voice-conversation-app-android &nbsp;·&nbsp; native Android port, Gemini Live voice conversation &nbsp;·&nbsp; <code>main</code></div>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="num">30</div><div class="lbl">releases</div></div>
+      <div class="stat"><div class="num">22.6h</div><div class="lbl">span</div></div>
+      <div class="stat"><div class="num">v0.26.0</div><div class="lbl">current</div></div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span><span class="dot" style="background:var(--feat)"></span>Feature</span>
+    <span><span class="dot" style="background:var(--fix)"></span>Fix</span>
+    <span><span class="dot" style="background:var(--rev)"></span>Revert / pivot</span>
+  </div>
+
+  <div class="timeline" id="timeline"></div>
+
+  <div class="footer">
+    <div>
+      <h3>Summary</h3>
+      <p>Built from scratch over one continuous session: Kotlin/Compose scaffold → real-time Gemini Live voice conversation → background service → voice-controlled YouTube playback → hands-free WhatsApp/SMS while driving → persistent multi-session history with a ChatGPT-style sidebar.</p>
+      <p>Every release was built headlessly (no ADB/emulator) and verified via <code style="font-family:var(--mono);color:var(--accent)">aapt dump badging</code> + the real Gemini Live API before being tagged and shipped as a sideload-ready debug APK.</p>
+    </div>
+    <div>
+      <h3>Key pivots</h3>
+      <ul class="milestones">
+        <li><span>YouTube playback</span><span class="v">A → C → A</span></li>
+        <li><span>Context persistence</span><span class="v">v0.23 – v0.24</span></li>
+        <li><span>Session sidebar</span><span class="v">v0.25.0 – v0.25.2</span></li>
+        <li><span>Stability hardening</span><span class="v">v0.25.3 – v0.26.0</span></li>
+      </ul>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const phases = [
+  {
+    name: "Foundation",
+    range: "Nov 4, 19:00 → 21:36",
+    desc: "Scaffold the app and get a real voice conversation with Gemini Live working end-to-end, fixing a chain of Android-specific runtime bugs (binary WS frames, ANRs, JSON API mismatch) along the way.",
+    entries: [
+      ["v0.1.0","15","feat","19:00","Kotlin/Compose scaffold: Gemini Live WebSocket client, audio engine, voice orb UI"],
+      ["v0.2.0","17","fix","19:52","Correct Live model id; load API key from local.properties"],
+      ["v0.3.0","19","fix","20:01","Crash-harden native audio paths; add file-based crash handler (no ADB access)"],
+      ["v0.4.0","21","fix","20:05","Fix NoSuchMethodError — Android's org.json API mismatch with desktop org.json"],
+      ["v0.5.0","23","fix","20:13","Diagnostic logging around setup/connect; WS ping interval for idle NAT survival"],
+      ["v0.6.0","25","fix","20:20","Fix silent no-response bug — Gemini sends replies as binary WS frames, not text"],
+      ["v0.7.0","27","fix","20:37","Fix ANR — decouple blocking AudioTrack.write() from the main-thread collector"],
+      ["v0.8.0","29","fix","21:06","Fix second ANR — throttle debug logging flood from per-chunk audio frames"],
+      ["v0.9.0","31","feat","21:11","Redesign UI in ChatGPT voice-mode style — gradient orb, bubbles, pill input"],
+      ["v0.10.0","33","feat","21:36","Retain full scrollable conversation history instead of last-exchange only"],
+    ]
+  },
+  {
+    name: "Background & YouTube",
+    range: "Nov 5, 03:58 → 08:35",
+    desc: "Survive backgrounding via a foreground service, then add voice-triggered YouTube playback — explored three different playback architectures as real-world embeddability/focus issues surfaced.",
+    entries: [
+      ["v0.11.0","35","fix","03:58","Fix false 'crashed' error on stop — CancellationException miscaught as a crash"],
+      ["v0.12.0","37","feat","04:06","Foreground service: voice session now survives backgrounding"],
+      ["v0.13.0","39","feat","04:43","Voice-triggered YouTube playback via Gemini function calling (play_youtube)"],
+      ["v0.14.0","41","fix","05:20","Real YouTube Data API search + relay through Activity to dodge BAL restriction"],
+      ["v0.14.1","43","fix","05:30","Fix stale versionCode across 14 releases silently blocking sideload updates"],
+      ["v0.15.0","45","fix","05:43","Guaranteed tap-to-play notification fallback for background-launch blocks"],
+      ["v0.16.0","47","rev","07:56","Switch to embedded in-app YouTube player (WebView) to fully avoid BAL limits"],
+      ["v0.17.0","49","fix","08:08","Fix 'video unavailable' via embeddable filtering; add forward/rewind controls"],
+      ["v0.18.0","51","fix","08:13","Auto-retry next search candidate in-app instead of dead-ending on one video"],
+      ["v0.19.0","53","feat","08:22","Auto-reconnect on WebSocket drop instead of a stuck error screen"],
+      ["v0.20.0","55","rev","08:35","Revert to external YouTube app + notification fallback, per user preference"],
+    ]
+  },
+  {
+    name: "Driving Mode",
+    range: "Nov 5, 09:55 → 11:41",
+    desc: "Hands-free messaging while driving: read incoming WhatsApp/SMS aloud into the live conversation and reply by voice, plus historical SMS queries.",
+    entries: [
+      ["v0.21.0","57","feat","09:55","Driving mode: hands-free WhatsApp read + reply via NotificationListenerService"],
+      ["v0.22.0","59","feat","11:41","Add SMS to Driving mode — real-time read+reply plus by-contact/time history queries"],
+    ]
+  },
+  {
+    name: "Persistence & Sessions",
+    range: "Nov 5, 12:32 → 15:53",
+    desc: "Stop losing context on disconnect or app close, then rebuild it as proper multi-session history with an independently-contexted ChatGPT-style sidebar.",
+    entries: [
+      ["v0.23.0","61","feat","12:32","Session resumption via Gemini's sessionResumption handle; add send_sms"],
+      ["v0.24.0","63","feat","12:47","Persist conversation across a fully-closed app, like ChatGPT"],
+      ["v0.25.0","65","feat","14:57","ChatGPT-style session sidebar — switch / delete / new chat, grouped by date"],
+      ["v0.25.1","67","fix","15:21","Fix sidebar drawer sliver + a foreground-service crash on session switch"],
+      ["v0.25.2","69","fix","15:53","Fix session content disappearing on switch-back (wrong disk save target)"],
+    ]
+  },
+  {
+    name: "Stability & Search Accuracy",
+    range: "Nov 5, 16:32 → 17:37",
+    desc: "Close out remaining connection and search-accuracy bugs found via live user testing.",
+    entries: [
+      ["v0.25.3","71","fix","16:32","Fix app hanging on 'Connecting…' forever — missing WebSocket close handler"],
+      ["v0.26.0","73","fix","17:37","Fix 'no live stream found' — skip non-video results, add explicit live search"],
+    ]
+  },
+];
+
+const tl = document.getElementById('timeline');
+phases.forEach(p => {
+  const phaseEl = document.createElement('div');
+  phaseEl.className = 'phase';
+  phaseEl.innerHTML = `
+    <div class="phase-head"><h2>${p.name}</h2><span class="range">${p.range}</span></div>
+    <div class="phase-desc">${p.desc}</div>
+    <div class="entries">
+      ${p.entries.map(e => `
+        <div class="entry ${e[2]}">
+          <div class="ver">${e[0]}<span class="vcode">code ${e[1]}</span></div>
+          <div class="desc"><span class="tag">${e[2]}</span>${e[4]}</div>
+          <div class="time">${e[3]}</div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+  tl.appendChild(phaseEl);
+});
+</script>
+</body>
+</html>
