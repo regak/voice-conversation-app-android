@@ -115,6 +115,9 @@ class VoiceSessionService : Service() {
     @Volatile private var muted: Boolean = false
     private var openTranscriptLine: TranscriptLine? = null
     private var sessionJob: Job? = null
+    private var reconnectJob: Job? = null
+    private var lastApiKey: String = ""
+    private var reconnectAttempts: Int = 0
     private val serviceScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
 
     override fun onCreate() {
@@ -344,6 +347,7 @@ class VoiceSessionService : Service() {
             orbState.value = OrbState.ERROR
             return
         }
+        lastApiKey = apiKeyValue
         orbState.value = OrbState.CONNECTING
         lastError.value = null
         updateNotification("Connecting...")
@@ -374,6 +378,7 @@ class VoiceSessionService : Service() {
                         is GeminiLiveClient.Event.Connected -> log("ws connected")
                         is GeminiLiveClient.Event.SetupComplete -> {
                             log("setupComplete received -- starting mic capture")
+                            reconnectAttempts = 0 // connection is healthy again
                             orbState.value = OrbState.LISTENING
                             updateNotification("Listening...")
                             engine.startCapture()
@@ -410,6 +415,7 @@ class VoiceSessionService : Service() {
                             lastError.value = event.message
                             orbState.value = OrbState.ERROR
                             updateNotification("Error")
+                            scheduleReconnect(event.message)
                         }
                         is GeminiLiveClient.Event.Closed -> {
                             log("closed: ${event.reason}")
@@ -432,6 +438,9 @@ class VoiceSessionService : Service() {
     }
 
     private fun stopSession() {
+        reconnectJob?.cancel()
+        reconnectJob = null
+        reconnectAttempts = 0
         sessionJob?.cancel()
         sessionJob = null
         runCatching { audioEngine?.release() }
@@ -441,6 +450,40 @@ class VoiceSessionService : Service() {
         openTranscriptLine = null
         lastError.value = null
         orbState.value = OrbState.IDLE
+    }
+
+    /** The Live WebSocket can drop on its own (e.g. a flaky mobile network
+     *  missing a ping/pong within the keep-alive window) -- previously this
+     *  just left the user stuck on a red error screen needing a manual
+     *  stop+restart. Now it retries automatically a few times with backoff,
+     *  reusing the same API key, and gives up (leaving the error visible)
+     *  only after repeated failures, so a bad key or persistent outage
+     *  doesn't loop forever silently. */
+    private fun scheduleReconnect(reason: String) {
+        reconnectAttempts++
+        if (reconnectAttempts > 3) {
+            log("giving up auto-reconnect after $reconnectAttempts attempts: $reason")
+            return
+        }
+        val delayMs = when (reconnectAttempts) {
+            1 -> 2_000L
+            2 -> 5_000L
+            else -> 10_000L
+        }
+        log("scheduling reconnect attempt $reconnectAttempts in ${delayMs}ms after: $reason")
+        reconnectJob?.cancel()
+        reconnectJob = serviceScope.launch {
+            kotlinx.coroutines.delay(delayMs)
+            sessionJob?.cancel()
+            sessionJob = null
+            runCatching { audioEngine?.release() }
+            runCatching { client?.close() }
+            audioEngine = null
+            client = null
+            updateNotification("Reconnecting...")
+            orbState.value = OrbState.CONNECTING
+            startSession(lastApiKey)
+        }
     }
 
     private fun createNotificationChannel() {
