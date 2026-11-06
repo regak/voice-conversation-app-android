@@ -316,8 +316,9 @@ class GeminiLiveClient(
                                 "Searches the user's actual SMS message history on the " +
                                     "phone (not just new arrivals). Use for requests like " +
                                     "'read my messages from Mom today', 'any unread texts?', " +
-                                    "or 'what did John say yesterday'. Returns a list of " +
-                                    "matching messages for you to summarize/read aloud.",
+                                    "'what did John say yesterday', or 'any messages on " +
+                                    "October 29th 2026'. Returns a list of matching messages " +
+                                    "for you to summarize/read aloud.",
                             )
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -328,7 +329,20 @@ class GeminiLiveClient(
                                     })
                                     put("time_range", JSONObject().apply {
                                         put("type", "STRING")
-                                        put("description", "One of: 'today', 'yesterday', 'this_week', or 'all' (default).")
+                                        put("description", "One of: 'today', 'yesterday', 'this_week', or 'all' (default). Ignored if specific_date is set.")
+                                    })
+                                    put("specific_date", JSONObject().apply {
+                                        put("type", "STRING")
+                                        put(
+                                            "description",
+                                            "Use this whenever the user names an exact calendar " +
+                                                "date (e.g. 'October 29th', 'the 28th of October " +
+                                                "2026') instead of relative terms like 'today' -- " +
+                                                "time_range cannot express a specific date. Format " +
+                                                "strictly as YYYY-MM-DD, resolving any year the user " +
+                                                "doesn't state from today's date. Overrides time_range " +
+                                                "when set.",
+                                        )
                                     })
                                     put("unread_only", JSONObject().apply {
                                         put("type", "BOOLEAN")

@@ -259,11 +259,16 @@ class VoiceSessionService : Service() {
          *  just new arrivals -- for "read my messages from Mom today" /
          *  "any unread SMS?" style requests. contactHint is resolved
          *  against Contacts to the matching phone number(s) when given;
-         *  timeRange is one of "today"/"yesterday"/"this_week"/"all". */
+         *  timeRange is one of "today"/"yesterday"/"this_week"/"all".
+         *  specificDate (YYYY-MM-DD), when non-blank, overrides timeRange
+         *  entirely -- this is what makes "any messages on October 29th"
+         *  work at all, since time_range has no way to express an exact
+         *  calendar date. */
         fun querySms(
             context: android.content.Context,
             contactHint: String,
             timeRange: String,
+            specificDate: String,
             unreadOnly: Boolean,
         ): org.json.JSONObject {
             val selectionParts = mutableListOf<String>()
@@ -285,21 +290,48 @@ class VoiceSessionService : Service() {
             cal.set(java.util.Calendar.HOUR_OF_DAY, 0); cal.set(java.util.Calendar.MINUTE, 0)
             cal.set(java.util.Calendar.SECOND, 0); cal.set(java.util.Calendar.MILLISECOND, 0)
             val todayStart = cal.timeInMillis
-            when (timeRange.lowercase()) {
-                "today" -> {
-                    selectionParts.add("${android.provider.Telephony.Sms.DATE} >= ?")
-                    selectionArgs.add(todayStart.toString())
+
+            // A specific calendar date (e.g. "2026-10-29") always wins over
+            // the relative time_range enum -- it's the only way to express
+            // "October 29th" at all, since time_range literally has no slot
+            // for an exact date.
+            var usingSpecificDate = false
+            if (specificDate.isNotBlank()) {
+                val parsed = runCatching {
+                    val fmt = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+                    fmt.isLenient = false
+                    val dateCal = java.util.Calendar.getInstance()
+                    dateCal.time = fmt.parse(specificDate)!!
+                    dateCal.set(java.util.Calendar.HOUR_OF_DAY, 0); dateCal.set(java.util.Calendar.MINUTE, 0)
+                    dateCal.set(java.util.Calendar.SECOND, 0); dateCal.set(java.util.Calendar.MILLISECOND, 0)
+                    dateCal.timeInMillis
+                }.getOrNull()
+                if (parsed == null) {
+                    return org.json.JSONObject().apply {
+                        put("error", "Could not parse specific_date '$specificDate' -- expected YYYY-MM-DD")
+                    }
                 }
-                "yesterday" -> {
-                    selectionParts.add("${android.provider.Telephony.Sms.DATE} >= ? AND ${android.provider.Telephony.Sms.DATE} < ?")
-                    selectionArgs.add((todayStart - dayMs).toString())
-                    selectionArgs.add(todayStart.toString())
+                selectionParts.add("${android.provider.Telephony.Sms.DATE} >= ? AND ${android.provider.Telephony.Sms.DATE} < ?")
+                selectionArgs.add(parsed.toString())
+                selectionArgs.add((parsed + dayMs).toString())
+                usingSpecificDate = true
+            } else {
+                when (timeRange.lowercase()) {
+                    "today" -> {
+                        selectionParts.add("${android.provider.Telephony.Sms.DATE} >= ?")
+                        selectionArgs.add(todayStart.toString())
+                    }
+                    "yesterday" -> {
+                        selectionParts.add("${android.provider.Telephony.Sms.DATE} >= ? AND ${android.provider.Telephony.Sms.DATE} < ?")
+                        selectionArgs.add((todayStart - dayMs).toString())
+                        selectionArgs.add(todayStart.toString())
+                    }
+                    "this_week" -> {
+                        selectionParts.add("${android.provider.Telephony.Sms.DATE} >= ?")
+                        selectionArgs.add((todayStart - 7 * dayMs).toString())
+                    }
+                    // "all" or anything else -- no date filter.
                 }
-                "this_week" -> {
-                    selectionParts.add("${android.provider.Telephony.Sms.DATE} >= ?")
-                    selectionArgs.add((todayStart - 7 * dayMs).toString())
-                }
-                // "all" or anything else -- no date filter.
             }
 
             if (unreadOnly) {
@@ -320,7 +352,15 @@ class VoiceSessionService : Service() {
                     ),
                     selection,
                     if (selectionArgs.isEmpty()) null else selectionArgs.toTypedArray(),
-                    "${android.provider.Telephony.Sms.DATE} DESC LIMIT 20",
+                    // A date-filtered query (specific date, today, yesterday,
+                    // this_week) is already scoped narrowly by the WHERE
+                    // clause, so a generous cap here is just a safety net.
+                    // Only the genuinely unbounded "all messages, no filter"
+                    // case needs a tight cap -- previously this LIMIT 20
+                    // applied even to a dated query, which silently hid
+                    // real results whenever the user had sent/received more
+                    // than 20 newer messages since that date.
+                    "${android.provider.Telephony.Sms.DATE} DESC LIMIT ${if (usingSpecificDate) 100 else 20}",
                 )?.use { cursor ->
                     val addressIdx = cursor.getColumnIndex(android.provider.Telephony.Sms.ADDRESS)
                     val bodyIdx = cursor.getColumnIndex(android.provider.Telephony.Sms.BODY)
@@ -513,8 +553,9 @@ class VoiceSessionService : Service() {
                 serviceScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                     val contactHint = call.args.optString("contact_hint")
                     val timeRange = call.args.optString("time_range", "all")
+                    val specificDate = call.args.optString("specific_date")
                     val unreadOnly = call.args.optBoolean("unread_only", false)
-                    val result = querySms(applicationContext, contactHint, timeRange, unreadOnly)
+                    val result = querySms(applicationContext, contactHint, timeRange, specificDate, unreadOnly)
                     if (call.id.isNotEmpty()) client.sendToolResponse(call.id, result)
                 }
             }
