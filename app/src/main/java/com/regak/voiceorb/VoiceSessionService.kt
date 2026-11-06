@@ -387,11 +387,28 @@ class VoiceSessionService : Service() {
     private var reconnectJob: Job? = null
     private var lastApiKey: String = ""
     private var reconnectAttempts: Int = 0
+    // Latest resumable session handle (see GeminiLiveClient's
+    // sessionResumption docs) -- carried into every new GeminiLiveClient
+    // we create, whether from an auto-reconnect after a network drop or a
+    // deliberate stop/start, so the model keeps full context instead of
+    // "forgetting everything" the way a brand-new session would.
+    private var lastResumeHandle: String? = null
     private val serviceScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        // Restore state that should survive the app being fully closed
+        // (not just a network drop, which GeminiLiveClient's in-memory
+        // sessionResumption already covers) -- a fresh Service instance is
+        // created here exactly when the whole process had been killed, so
+        // this is the right place to reload from disk.
+        lastResumeHandle = ConversationPersistence.loadResumeHandle(applicationContext)
+        if (transcript.isEmpty()) {
+            ConversationPersistence.loadTranscript(applicationContext).forEach { (isModel, text) ->
+                transcript.add(TranscriptLine(isModel).apply { this.text = text })
+            }
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -450,6 +467,13 @@ class VoiceSessionService : Service() {
 
     private fun closeOpenTranscriptLine() {
         openTranscriptLine = null
+        // Persist on every closed line (not every delta) -- cheap enough
+        // at conversation-turn frequency, and means a killed process never
+        // loses more than the currently-in-progress line.
+        ConversationPersistence.saveTranscript(
+            applicationContext,
+            transcript.map { it.isModel to it.text },
+        )
     }
 
     /** Dispatches a parsed tool call to a real native action and reports the
@@ -695,7 +719,7 @@ class VoiceSessionService : Service() {
         )
         audioEngine = engine
 
-        val gemini = GeminiLiveClient(apiKey = apiKeyValue)
+        val gemini = GeminiLiveClient(apiKey = apiKeyValue, resumeHandle = lastResumeHandle)
         client = gemini
 
         val exceptionHandler = CoroutineExceptionHandler { _, t ->
@@ -754,6 +778,13 @@ class VoiceSessionService : Service() {
                             log("closed: ${event.reason}")
                             orbState.value = OrbState.IDLE
                         }
+                        is GeminiLiveClient.Event.SessionResumptionUpdate -> {
+                            if (event.resumable) {
+                                lastResumeHandle = event.handle
+                                ConversationPersistence.saveResumeHandle(applicationContext, event.handle)
+                                log("got resumable session handle (context now preserved across reconnects AND app restarts)")
+                            }
+                        }
                     }
                 } catch (t: CancellationException) {
                     throw t // normal cooperative cancellation -- not an error
@@ -799,9 +830,20 @@ class VoiceSessionService : Service() {
             log("giving up auto-reconnect after $reconnectAttempts attempts: $reason")
             return
         }
-        // A WebSocket closed before setup completed (e.g. a transient
-        // server-side issue) is still worth retrying rather than leaving
-        // the user stuck on a red error screen.
+        // A stale/expired session-resumption handle gets rejected by the
+        // server with "session not found" (WS close code 1008) before
+        // setup ever completes. Retrying with the SAME bad handle would
+        // just repeat the identical rejection three more times and still
+        // end up stuck in ERROR. Self-heal by dropping the handle and
+        // starting a brand-new (non-resumed) session instead -- losing
+        // mid-air context recovery is much better than never connecting.
+        if (reason.contains("session not found", ignoreCase = true) ||
+            reason.contains("closed before setup completed", ignoreCase = true)
+        ) {
+            log("clearing possibly-stale session-resumption handle before retrying")
+            lastResumeHandle = null
+            ConversationPersistence.clearResumeHandle(applicationContext)
+        }
         val delayMs = when (reconnectAttempts) {
             1 -> 2_000L
             2 -> 5_000L

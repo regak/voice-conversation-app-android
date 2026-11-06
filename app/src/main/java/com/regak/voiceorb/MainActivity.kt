@@ -102,6 +102,18 @@ class MainActivity : ComponentActivity() {
         installCrashHandler()
         val previousCrash = readAndClearLastCrash()
 
+        // Restore the visible conversation immediately on cold app open --
+        // VoiceSessionService may not even be running yet (it only starts
+        // on "Start talking" or a Driving-mode notice), so loading here
+        // too means history shows up right away instead of only after the
+        // service happens to be created. Guarded by isEmpty() so this is a
+        // harmless no-op if the service already loaded it first.
+        if (VoiceSessionService.transcript.isEmpty()) {
+            ConversationPersistence.loadTranscript(applicationContext).forEach { (isModel, text) ->
+                VoiceSessionService.transcript.add(TranscriptLine(isModel).apply { this.text = text })
+            }
+        }
+
         setContent {
             VoiceOrbTheme {
                 VoiceOrbScreen(
