@@ -57,17 +57,23 @@ class WhatsAppNotificationListener : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         if (sbn.packageName != WHATSAPP_PACKAGE && sbn.packageName != WHATSAPP_BUSINESS_PACKAGE) return
+        VoiceSessionService.debugLog.add("WhatsApp notification received (key=${sbn.key})")
         val notification = sbn.notification ?: return
 
+        // Reply capability (inline RemoteInput action) is handled
+        // separately from whether we announce the message at all -- a
+        // notification can legitimately arrive WITHOUT one (summary/
+        // group notifications, some chat types, notification-channel
+        // variance across WhatsApp versions). Previously this whole
+        // function returned early with no announcement at all when that
+        // happened, which could make driving mode go silent for
+        // perfectly real incoming messages with no permission issue
+        // involved. Now we always try to announce; only voice-reply
+        // capture depends on a reply action actually being present.
         val replyAction = notification.actions?.firstOrNull { action ->
             action.remoteInputs?.isNotEmpty() == true
         }
         val remoteInputs = replyAction?.remoteInputs
-        if (replyAction == null || remoteInputs == null) {
-            // No inline-reply action on this notification (e.g. it's a
-            // media-only or summary notification) -- nothing we can act on.
-            return
-        }
 
         val style = NotificationCompat.MessagingStyle
             .extractMessagingStyleFromNotification(notification)
@@ -78,8 +84,10 @@ class WhatsAppNotificationListener : NotificationListenerService() {
             val title = notification.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
             val text = notification.extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
             if (title.isBlank() || text.isBlank()) return
-            synchronized(pendingReplies) {
-                pendingReplies[sbn.key] = PendingReply(title, text, replyAction, remoteInputs)
+            if (replyAction != null && remoteInputs != null) {
+                synchronized(pendingReplies) {
+                    pendingReplies[sbn.key] = PendingReply(title, text, replyAction, remoteInputs)
+                }
             }
             VoiceSessionService.onWhatsAppMessage(applicationContext, title, text)
             return
@@ -95,12 +103,14 @@ class WhatsAppNotificationListener : NotificationListenerService() {
         val messageText = latest.text?.toString().orEmpty()
         if (messageText.isBlank()) return
 
-        synchronized(pendingReplies) {
-            pendingReplies[sbn.key] = PendingReply(senderName, messageText, replyAction, remoteInputs)
-            // Keep this bounded -- only the few most recent conversations
-            // are realistically still repliable/relevant.
-            while (pendingReplies.size > 10) {
-                pendingReplies.remove(pendingReplies.keys.first())
+        if (replyAction != null && remoteInputs != null) {
+            synchronized(pendingReplies) {
+                pendingReplies[sbn.key] = PendingReply(senderName, messageText, replyAction, remoteInputs)
+                // Keep this bounded -- only the few most recent conversations
+                // are realistically still repliable/relevant.
+                while (pendingReplies.size > 10) {
+                    pendingReplies.remove(pendingReplies.keys.first())
+                }
             }
         }
         VoiceSessionService.onWhatsAppMessage(applicationContext, senderName, messageText)

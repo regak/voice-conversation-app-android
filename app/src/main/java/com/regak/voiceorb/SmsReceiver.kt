@@ -21,6 +21,7 @@ class SmsReceiver : BroadcastReceiver() {
         if (intent.action != Telephony.Sms.Intents.SMS_RECEIVED_ACTION) return
         val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent) ?: return
         if (messages.isEmpty()) return
+        VoiceSessionService.debugLog.add("SMS received (${messages.size} part(s))")
 
         // A single SMS can arrive split into multiple PDU parts (long
         // messages) -- they share one originating address, so concatenate

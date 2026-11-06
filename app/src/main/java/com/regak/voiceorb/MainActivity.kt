@@ -366,6 +366,37 @@ fun VoiceOrbScreen(
             // isn't granted yet rather than silently doing nothing.
             val drivingMode by VoiceSessionService.drivingMode
             val context = androidx.compose.ui.platform.LocalContext.current
+
+            // Android can silently revoke "Notification access" (and, less
+            // commonly, runtime permissions) on an app update/reinstall --
+            // confirmed as the real explanation for "the toggle shows ON
+            // but I stopped hearing WhatsApp/SMS": drivingMode.value stays
+            // true in memory forever once set, since nothing previously
+            // re-checked the underlying OS permission after the fact. This
+            // re-verifies on every screen resume and corrects the toggle +
+            // explains why, instead of silently doing nothing.
+            LaunchedEffect(Unit) {
+                while (true) {
+                    if (VoiceSessionService.drivingMode.value) {
+                        val notifGranted = WhatsAppNotificationListener.isEnabled(context)
+                        val smsGranted = ContextCompat.checkSelfPermission(
+                            context, Manifest.permission.RECEIVE_SMS,
+                        ) == PackageManager.PERMISSION_GRANTED && ContextCompat.checkSelfPermission(
+                            context, Manifest.permission.SEND_SMS,
+                        ) == PackageManager.PERMISSION_GRANTED
+                        if (!notifGranted || !smsGranted) {
+                            VoiceSessionService.drivingMode.value = false
+                            viewModel.lastError.value =
+                                "Driving mode turned itself off -- Android revoked " +
+                                    (if (!notifGranted) "'Notification access' " else "") +
+                                    (if (!smsGranted) "SMS permission " else "") +
+                                    "(this can happen after reinstalling an update). " +
+                                    "Turn Driving mode back on to re-grant it."
+                        }
+                    }
+                    kotlinx.coroutines.delay(5000)
+                }
+            }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()

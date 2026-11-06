@@ -84,7 +84,10 @@ class VoiceSessionService : Service() {
          *  aloud and can simply reply by talking -- the model will call
          *  reply_whatsapp with the drafted text. */
         fun onWhatsAppMessage(context: android.content.Context, senderName: String, messageText: String) {
-            if (!drivingMode.value) return
+            if (!drivingMode.value) {
+                debugLog.add("WhatsApp message from $senderName ignored -- Driving mode is off")
+                return
+            }
             val notice = "[SYSTEM NOTICE -- not something the user said. A new " +
                 "WhatsApp message just arrived while the user is driving. Tell " +
                 "the user about it naturally and briefly, then ask if they want " +
@@ -158,7 +161,10 @@ class VoiceSessionService : Service() {
         /** Called by SmsReceiver for every new SMS while driving mode is
          *  on. Same announce-into-the-live-session flow as WhatsApp. */
         fun onSmsMessage(context: android.content.Context, senderName: String, phoneNumber: String, messageText: String) {
-            if (!drivingMode.value) return
+            if (!drivingMode.value) {
+                debugLog.add("SMS from $senderName ignored -- Driving mode is off")
+                return
+            }
             synchronized(pendingSmsSenders) {
                 pendingSmsSenders[phoneNumber] = PendingSmsSender(senderName, phoneNumber)
                 while (pendingSmsSenders.size > 10) {
@@ -439,36 +445,44 @@ class VoiceSessionService : Service() {
             // that race entirely and guarantees startForeground() is (re)called
             // well within the 5s window.
             ACTION_SWITCH_SESSION -> {
-                // Flush the OUTGOING session's live transcript to its own
-                // disk record FIRST, explicitly by the id we know it
-                // actually belongs to -- before touching anything else.
-                // This is what was silently failing before: relying on
-                // closeOpenTranscriptLine()'s use of the shared "current
-                // session id" meant a switch away before a turn fully
-                // closed (or any async race with the UI already flipping
-                // the current-id pointer) left the outgoing session's
-                // record stale/empty on disk, so switching back later
-                // loaded nothing -- even though a full app restart (which
-                // re-reads via a different path) could still show it if
-                // an earlier turn happened to save correctly.
-                val outgoingId = activeSessionId
-                if (outgoingId != null) {
-                    SessionManager.loadAll(applicationContext).firstOrNull { it.id == outgoingId }?.let { outgoing ->
-                        SessionManager.updateSession(
-                            applicationContext,
-                            outgoing.copy(transcript = transcript.map { it.isModel to it.text }),
-                        )
-                    }
-                }
-                stopSession()
-                val sessionId = intent.getStringExtra(EXTRA_SESSION_ID)
-                val session = if (sessionId != null) {
-                    SessionManager.loadAll(applicationContext).firstOrNull { it.id == sessionId }
-                } else {
-                    null
-                }
-                activeSessionId = session?.id ?: sessionId
+                // Clear the VISIBLE transcript FIRST, unconditionally, before
+                // any disk I/O that could theoretically throw -- if anything
+                // below fails, the UI must never be left showing the stale
+                // previous session's messages under the new session's name.
+                val previousTranscriptSnapshot = transcript.map { it.isModel to it.text }
                 transcript.clear()
+
+                val outgoingId = activeSessionId
+                val sessionId = intent.getStringExtra(EXTRA_SESSION_ID)
+                var session: SessionManager.Session? = null
+                try {
+                    // Flush the OUTGOING session's live transcript to its own
+                    // disk record FIRST, explicitly by the id we know it
+                    // actually belongs to. This is what was silently failing
+                    // before: relying on closeOpenTranscriptLine()'s use of
+                    // the shared "current session id" meant a switch away
+                    // before a turn fully closed left the outgoing session's
+                    // record stale/empty on disk, so switching back later
+                    // loaded nothing.
+                    if (outgoingId != null) {
+                        SessionManager.loadAll(applicationContext).firstOrNull { it.id == outgoingId }?.let { outgoing ->
+                            SessionManager.updateSession(
+                                applicationContext,
+                                outgoing.copy(transcript = previousTranscriptSnapshot),
+                            )
+                        }
+                    }
+                    if (sessionId != null) {
+                        session = SessionManager.loadAll(applicationContext).firstOrNull { it.id == sessionId }
+                    }
+                } catch (t: Throwable) {
+                    log("ACTION_SWITCH_SESSION persistence step failed (continuing with a fresh session anyway): ${t.javaClass.simpleName}: ${t.message}")
+                }
+
+                stopSession()
+                activeSessionId = session?.id ?: sessionId
+                // transcript was already cleared above -- only repopulate if
+                // we actually found saved content for the TARGET session.
                 session?.transcript?.forEach { (isModel, text) ->
                     transcript.add(TranscriptLine(isModel).apply { this.text = text })
                 }
