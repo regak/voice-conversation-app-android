@@ -44,13 +44,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 class GeminiLiveClient(
     private val apiKey: String,
     private val model: String = "models/gemini-3.8-live",
-    // A handle from a prior SessionResumptionUpdate event -- passing it
-    // resumes the EXACT same server-side conversation state (full
-    // context, not just our own local transcript) instead of starting
-    // fresh. This is what actually fixes "forgets everything after a
-    // network drop": our own auto-reconnect used to just open a brand
-    // new, empty session.
-    private val resumeHandle: String? = null,
 ) {
     companion object {
         private const val TAG = "GeminiLiveClient"
@@ -69,12 +62,6 @@ class GeminiLiveClient(
         data class RawServerMessage(val text: String) : Event()
         data class Failure(val message: String) : Event()
         data class Closed(val reason: String) : Event()
-        /** A resumable handle for this exact conversation's server-side
-         *  state, sent periodically by the server. [resumable] is false
-         *  during the brief window right after the server invalidates the
-         *  previous handle while preparing a new one -- only handles with
-         *  resumable=true are safe to reconnect with later. */
-        data class SessionResumptionUpdate(val handle: String, val resumable: Boolean) : Event()
     }
 
     private val _events = MutableSharedFlow<Event>(extraBufferCapacity = 64)
@@ -163,14 +150,6 @@ class GeminiLiveClient(
                 })
                 put("inputAudioTranscription", JSONObject())
                 put("outputAudioTranscription", JSONObject())
-                // Requests the server to periodically send a resumable
-                // handle (SessionResumptionUpdate) -- reconnecting later
-                // with that handle restores the EXACT same conversation
-                // state server-side, fixing "forgets everything after a
-                // network drop" instead of just opening an empty session.
-                put("sessionResumption", JSONObject().apply {
-                    if (!resumeHandle.isNullOrBlank()) put("handle", resumeHandle)
-                })
                 put("tools", JSONArray(listOf(
                     // NOTE: googleSearch grounding is deliberately NOT
                     // enabled here -- it requires a billing-enabled Gemini
@@ -361,14 +340,6 @@ class GeminiLiveClient(
             emit(Event.RawServerMessage(text))
             emit(Event.SetupComplete(text))
             flushPendingAudio()
-            return
-        }
-
-        if (json.has("sessionResumptionUpdate")) {
-            val update = json.getJSONObject("sessionResumptionUpdate")
-            val handle = update.optString("newHandle")
-            val resumable = update.optBoolean("resumable", false)
-            if (handle.isNotBlank()) emit(Event.SessionResumptionUpdate(handle, resumable))
             return
         }
 

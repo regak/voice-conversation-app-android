@@ -48,11 +48,9 @@ class VoiceSessionService : Service() {
 
         const val ACTION_START = "com.regak.voiceorb.action.START"
         const val ACTION_STOP = "com.regak.voiceorb.action.STOP"
-        const val ACTION_SWITCH_SESSION = "com.regak.voiceorb.action.SWITCH_SESSION"
         const val ACTION_SET_MUTED = "com.regak.voiceorb.action.SET_MUTED"
         const val EXTRA_API_KEY = "api_key"
         const val EXTRA_MUTED = "muted"
-        const val EXTRA_SESSION_ID = "session_id"
 
         // Shared Compose state -- the Activity reads these directly, the
         // Service writes to them. This replaces the old ViewModel-owned
@@ -389,34 +387,11 @@ class VoiceSessionService : Service() {
     private var reconnectJob: Job? = null
     private var lastApiKey: String = ""
     private var reconnectAttempts: Int = 0
-    // Latest resumable session handle (see GeminiLiveClient's
-    // sessionResumption docs) -- carried into every new GeminiLiveClient
-    // we create, whether from an auto-reconnect after a network drop or a
-    // deliberate stop/start, so the model keeps full context instead of
-    // "forgetting everything" the way a brand-new session would.
-    private var lastResumeHandle: String? = null
-    // Which saved session the LIVE transcript/connection actually belongs to
-    // right now. Deliberately NOT read from SessionManager.getCurrentId()
-    // when persisting -- that's a UI-owned pointer the drawer flips the
-    // instant the user taps a different session, often before this
-    // service has finished flushing the OLD session's final turn. Using
-    // our own tracked id as the save target removes that race entirely.
-    private var activeSessionId: String? = null
     private val serviceScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        // Load the currently-selected session (or create a new one if none exists).
-        val session = SessionManager.getCurrent(applicationContext)
-            ?: SessionManager.newSession(applicationContext)
-        activeSessionId = session.id
-        lastResumeHandle = session.resumeHandle
-        if (transcript.isEmpty() && session.transcript.isNotEmpty()) {
-            session.transcript.forEach { (isModel, text) ->
-                transcript.add(TranscriptLine(isModel).apply { this.text = text })
-            }
-        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -432,64 +407,6 @@ class VoiceSessionService : Service() {
                 stopSession()
                 ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
                 stopSelf()
-            }
-            // Switches to a different saved session (or a brand-new one) in a
-            // SINGLE onStartCommand call. Deliberately not split into a
-            // separate STOP intent followed by a separate START intent from
-            // the caller: two separate startService()/startForegroundService()
-            // calls race against each other (the old instance can call
-            // stopSelf() right as the new start command arrives), which is
-            // exactly what caused a real
-            // ForegroundServiceDidNotStartInTimeException crash in testing.
-            // Doing stop+reload+start synchronously inside one command avoids
-            // that race entirely and guarantees startForeground() is (re)called
-            // well within the 5s window.
-            ACTION_SWITCH_SESSION -> {
-                // Clear the VISIBLE transcript FIRST, unconditionally, before
-                // any disk I/O that could theoretically throw -- if anything
-                // below fails, the UI must never be left showing the stale
-                // previous session's messages under the new session's name.
-                val previousTranscriptSnapshot = transcript.map { it.isModel to it.text }
-                transcript.clear()
-
-                val outgoingId = activeSessionId
-                val sessionId = intent.getStringExtra(EXTRA_SESSION_ID)
-                var session: SessionManager.Session? = null
-                try {
-                    // Flush the OUTGOING session's live transcript to its own
-                    // disk record FIRST, explicitly by the id we know it
-                    // actually belongs to. This is what was silently failing
-                    // before: relying on closeOpenTranscriptLine()'s use of
-                    // the shared "current session id" meant a switch away
-                    // before a turn fully closed left the outgoing session's
-                    // record stale/empty on disk, so switching back later
-                    // loaded nothing.
-                    if (outgoingId != null) {
-                        SessionManager.loadAll(applicationContext).firstOrNull { it.id == outgoingId }?.let { outgoing ->
-                            SessionManager.updateSession(
-                                applicationContext,
-                                outgoing.copy(transcript = previousTranscriptSnapshot),
-                            )
-                        }
-                    }
-                    if (sessionId != null) {
-                        session = SessionManager.loadAll(applicationContext).firstOrNull { it.id == sessionId }
-                    }
-                } catch (t: Throwable) {
-                    log("ACTION_SWITCH_SESSION persistence step failed (continuing with a fresh session anyway): ${t.javaClass.simpleName}: ${t.message}")
-                }
-
-                stopSession()
-                activeSessionId = session?.id ?: sessionId
-                // transcript was already cleared above -- only repopulate if
-                // we actually found saved content for the TARGET session.
-                session?.transcript?.forEach { (isModel, text) ->
-                    transcript.add(TranscriptLine(isModel).apply { this.text = text })
-                }
-                lastResumeHandle = session?.resumeHandle
-                val apiKey = intent.getStringExtra(EXTRA_API_KEY).orEmpty()
-                startForegroundNotification()
-                startSession(apiKey)
             }
             ACTION_SET_MUTED -> {
                 muted = intent.getBooleanExtra(EXTRA_MUTED, false)
@@ -533,14 +450,6 @@ class VoiceSessionService : Service() {
 
     private fun closeOpenTranscriptLine() {
         openTranscriptLine = null
-        // Persist to the session this live transcript actually belongs to
-        // (NOT SessionManager.getCurrentId() -- see activeSessionId's doc).
-        activeSessionId?.let { id ->
-            SessionManager.loadAll(applicationContext).firstOrNull { it.id == id }?.let { session ->
-                val updated = session.copy(transcript = transcript.map { it.isModel to it.text })
-                SessionManager.updateSession(applicationContext, updated)
-            }
-        }
     }
 
     /** Dispatches a parsed tool call to a real native action and reports the
@@ -786,7 +695,7 @@ class VoiceSessionService : Service() {
         )
         audioEngine = engine
 
-        val gemini = GeminiLiveClient(apiKey = apiKeyValue, resumeHandle = lastResumeHandle)
+        val gemini = GeminiLiveClient(apiKey = apiKeyValue)
         client = gemini
 
         val exceptionHandler = CoroutineExceptionHandler { _, t ->
@@ -845,20 +754,6 @@ class VoiceSessionService : Service() {
                             log("closed: ${event.reason}")
                             orbState.value = OrbState.IDLE
                         }
-                        is GeminiLiveClient.Event.SessionResumptionUpdate -> {
-                            if (event.resumable) {
-                                lastResumeHandle = event.handle
-                                // Persist to the session this connection
-                                // actually belongs to (see activeSessionId).
-                                activeSessionId?.let { id ->
-                                    SessionManager.loadAll(applicationContext).firstOrNull { it.id == id }?.let { session ->
-                                        val updated = session.copy(resumeHandle = event.handle)
-                                        SessionManager.updateSession(applicationContext, updated)
-                                    }
-                                }
-                                log("got resumable session handle (saved to current session)")
-                            }
-                        }
                     }
                 } catch (t: CancellationException) {
                     throw t // normal cooperative cancellation -- not an error
@@ -904,24 +799,9 @@ class VoiceSessionService : Service() {
             log("giving up auto-reconnect after $reconnectAttempts attempts: $reason")
             return
         }
-        // A stale/expired session-resumption handle gets rejected by the
-        // server with "session not found" (WS close code 1008) before
-        // setup ever completes. Retrying with the SAME bad handle would
-        // just repeat the identical rejection three more times and still
-        // end up stuck in ERROR. Self-heal by dropping the handle and
-        // starting a brand-new (non-resumed) session instead -- losing
-        // mid-air context recovery is much better than never connecting.
-        if (reason.contains("session not found", ignoreCase = true) ||
-            reason.contains("closed before setup completed", ignoreCase = true)
-        ) {
-            log("clearing possibly-stale session-resumption handle before retrying")
-            lastResumeHandle = null
-            activeSessionId?.let { id ->
-                SessionManager.loadAll(applicationContext).firstOrNull { it.id == id }?.let { session ->
-                    SessionManager.updateSession(applicationContext, session.copy(resumeHandle = null))
-                }
-            }
-        }
+        // A WebSocket closed before setup completed (e.g. a transient
+        // server-side issue) is still worth retrying rather than leaving
+        // the user stuck on a red error screen.
         val delayMs = when (reconnectAttempts) {
             1 -> 2_000L
             2 -> 5_000L

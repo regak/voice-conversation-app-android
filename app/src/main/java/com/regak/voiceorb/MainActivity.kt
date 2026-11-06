@@ -102,18 +102,6 @@ class MainActivity : ComponentActivity() {
         installCrashHandler()
         val previousCrash = readAndClearLastCrash()
 
-        // Restore the visible conversation immediately on cold app open --
-        // VoiceSessionService may not even be running yet (it only starts
-        // on "Start talking" or a Driving-mode notice), so loading here
-        // too means history shows up right away instead of only after the
-        // service happens to be created. Guarded by isEmpty() so this is a
-        // harmless no-op if the service already loaded it first.
-        if (VoiceSessionService.transcript.isEmpty()) {
-            ConversationPersistence.loadTranscript(applicationContext).forEach { (isModel, text) ->
-                VoiceSessionService.transcript.add(TranscriptLine(isModel).apply { this.text = text })
-            }
-        }
-
         setContent {
             VoiceOrbTheme {
                 VoiceOrbScreen(
@@ -249,93 +237,15 @@ fun VoiceOrbScreen(
     var showDebug by remember { mutableStateOf(false) }
     var isMuted by remember { mutableStateOf(false) }
     var showInfoBanner by remember { mutableStateOf(true) }
-    var drawerOpen by remember { mutableStateOf(false) }
 
     val sessionActive = orbState != OrbState.IDLE && orbState != OrbState.ERROR
-    val context = LocalContext.current
-    val sessions = SessionManager.groupedForDisplay(SessionManager.loadAll(context))
-    val currentSessionId = SessionManager.getCurrentId(context)
 
-    val drawerState = rememberDrawerState(DrawerValue.Closed)
-    val drawerScope = rememberCoroutineScope()
-
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            ModalDrawerSheet(
-                modifier = Modifier.width(300.dp),
-                drawerContainerColor = Color.White,
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(top = 60.dp, start = 16.dp, end = 16.dp, bottom = 16.dp),
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(bottom = 16.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Text("Conversations", color = Color.Black, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                        IconButton(onClick = { drawerScope.launch { drawerState.close() } }) {
-                            Icon(Icons.Filled.Close, contentDescription = "Close", tint = Color.Gray)
-                        }
-                    }
-                    Divider(color = Color.LightGray)
-                    LazyColumn {
-                        sessions.forEach { group ->
-                            item {
-                                Text(group.label, color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.padding(top = 12.dp, bottom = 8.dp))
-                            }
-                            group.sessions.forEach { session ->
-                                item {
-                                    SessionListItem(
-                                        session = session,
-                                        isCurrent = SessionManager.getCurrentId(context) == session.id,
-                                        onClick = {
-                                            switchToSession(context, session.id)
-                                            drawerScope.launch { drawerState.close() }
-                                        },
-                                        onLongClick = {
-                                            deleteSession(context, session.id)
-                                        },
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    Spacer(modifier = Modifier.padding(bottom = 24.dp))
-                    // New chat button at bottom of drawer
-                    OutlinedButton(
-                        onClick = {
-                            newSession(context)
-                            drawerScope.launch { drawerState.close() }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        border = BorderStroke(1.dp, Color.LightGray),
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(vertical = 12.dp),
-                            horizontalArrangement = Arrangement.Center,
-                        ) {
-                            Icon(Icons.Filled.Add, contentDescription = null, tint = Color.Gray)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("New chat", color = Color.Gray, fontSize = 14.sp)
-                        }
-                    }
-                }
-            }
-        },
-        gesturesEnabled = true,
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFFF3F4F6)),
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color(0xFFF3F4F6)),
-        ) {
-            Column(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
             // Top bar: two circular icon buttons, ChatGPT voice-mode style.
             Row(
                 modifier = Modifier
@@ -343,7 +253,7 @@ fun VoiceOrbScreen(
                     .padding(horizontal = 16.dp, vertical = 12.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                RoundIconButton(icon = Icons.Filled.Menu, onClick = { drawerScope.launch { drawerState.open() } })
+                RoundIconButton(icon = Icons.Filled.Menu, onClick = { /* no-op: no nav drawer */ })
                 RoundIconButton(icon = Icons.Filled.Tune, onClick = { showDebug = !showDebug })
             }
 
@@ -628,7 +538,6 @@ fun VoiceOrbScreen(
             }
         }
     }
-    }
 }
 
 private fun statusText(state: OrbState, error: String?): String = when (state) {
@@ -691,114 +600,4 @@ fun Orb(state: OrbState, modifier: Modifier = Modifier) {
                 brush = Brush.verticalGradient(gradientColors),
             ),
     )
-}
-
-@Composable
-private fun SessionListItem(
-    session: SessionManager.Session,
-    isCurrent: Boolean,
-    onClick: () -> Unit,
-    onLongClick: () -> Unit,
-) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp)
-            .combinedClickableCompat(onClick = onClick, onLongClick = onLongClick),
-        color = if (isCurrent) Color(0xFFE8F0FE) else Color.Transparent,
-        shape = RoundedCornerShape(12.dp),
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text(
-                    text = session.title,
-                    color = Color.Black,
-                    fontSize = 14.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    fontWeight = if (isCurrent) FontWeight.Medium else FontWeight.Normal,
-                    modifier = Modifier.weight(1f),
-                )
-                if (isCurrent) {
-                    Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = Color(0xFF1A73E8), modifier = Modifier.size(18.dp))
-                }
-            }
-            Text(
-                text = formatRelativeTime(session.updatedAt),
-                color = Color.Gray,
-                fontSize = 11.sp,
-                modifier = Modifier.padding(top = 4.dp),
-            )
-        }
-    }
-}
-
-/** Plain clickable + long-press without pulling in the separate
- *  `foundation` combinedClickable experimental API opt-in. */
-private fun Modifier.combinedClickableCompat(onClick: () -> Unit, onLongClick: () -> Unit): Modifier =
-    this.then(
-        Modifier.pointerInput(Unit) {
-            detectTapGestures(
-                onTap = { onClick() },
-                onLongPress = { onLongClick() },
-            )
-        },
-    )
-
-private fun formatRelativeTime(timestamp: Long): String {
-    val now = System.currentTimeMillis()
-    val diff = now - timestamp
-    val minutes = diff / (60 * 1000)
-    val hours = diff / (60 * 60 * 1000)
-    val days = diff / (24 * 60 * 60 * 1000)
-    return when {
-        minutes < 1 -> "Just now"
-        minutes < 60 -> "$minutes min ago"
-        hours < 24 -> "$hours hr ago"
-        days < 7 -> "$days day${if (days > 1) "s" else ""} ago"
-        else -> {
-            val cal = java.util.Calendar.getInstance()
-            cal.timeInMillis = timestamp
-            "${cal.get(java.util.Calendar.MONTH) + 1}/${cal.get(java.util.Calendar.DAY_OF_MONTH)}"
-        }
-    }
-}
-
-private fun switchToSession(context: android.content.Context, sessionId: String) {
-    SessionManager.setCurrentId(context, sessionId)
-    val switchIntent = android.content.Intent(context, VoiceSessionService::class.java).apply {
-        action = VoiceSessionService.ACTION_SWITCH_SESSION
-        putExtra(VoiceSessionService.EXTRA_SESSION_ID, sessionId)
-        putExtra(VoiceSessionService.EXTRA_API_KEY, BuildConfig.GEMINI_API_KEY)
-    }
-    androidx.core.content.ContextCompat.startForegroundService(context, switchIntent)
-}
-
-private fun newSession(context: android.content.Context) {
-    val session = SessionManager.newSession(context)
-    SessionManager.setCurrentId(context, session.id)
-    val switchIntent = android.content.Intent(context, VoiceSessionService::class.java).apply {
-        action = VoiceSessionService.ACTION_SWITCH_SESSION
-        putExtra(VoiceSessionService.EXTRA_SESSION_ID, session.id)
-        putExtra(VoiceSessionService.EXTRA_API_KEY, BuildConfig.GEMINI_API_KEY)
-    }
-    androidx.core.content.ContextCompat.startForegroundService(context, switchIntent)
-}
-
-private fun deleteSession(context: android.content.Context, sessionId: String) {
-    val wasCurrent = SessionManager.getCurrentId(context) == sessionId
-    SessionManager.deleteSession(context, sessionId)
-
-    if (wasCurrent) {
-        val nextId = SessionManager.getCurrentId(context)
-        val switchIntent = android.content.Intent(context, VoiceSessionService::class.java).apply {
-            action = VoiceSessionService.ACTION_SWITCH_SESSION
-            putExtra(VoiceSessionService.EXTRA_SESSION_ID, nextId)
-            putExtra(VoiceSessionService.EXTRA_API_KEY, BuildConfig.GEMINI_API_KEY)
-        }
-        androidx.core.content.ContextCompat.startForegroundService(context, switchIntent)
-    }
 }
