@@ -351,6 +351,30 @@ class GeminiLiveClient(
                                 })
                             })
                         },
+                        JSONObject().apply {
+                            put("name", "query_whatsapp_unread")
+                            put(
+                                "description",
+                                "Checks for WhatsApp conversations that currently have an " +
+                                    "undismissed notification -- the closest available signal " +
+                                    "to 'unread WhatsApp messages', since WhatsApp (unlike SMS) " +
+                                    "has no message database other apps can query directly. " +
+                                    "Only sees conversations WhatsApp hasn't cleared the " +
+                                    "notification for yet, and only the recent messages WhatsApp " +
+                                    "included in that notification -- NOT a full unread backlog " +
+                                    "for conversations with a large unread count. State this " +
+                                    "limitation if the user seems to expect every unread message.",
+                            )
+                            put("parameters", JSONObject().apply {
+                                put("type", "OBJECT")
+                                put("properties", JSONObject().apply {
+                                    put("contact_hint", JSONObject().apply {
+                                        put("type", "STRING")
+                                        put("description", "Optional: a contact/group name to filter by. Omit to check all conversations.")
+                                    })
+                                })
+                            })
+                        },
                     ))),
                 )))
             })

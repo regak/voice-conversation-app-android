@@ -53,6 +53,83 @@ class WhatsAppNotificationListener : NotificationListenerService() {
          *  last. VoiceSessionService reads/clears this; this class only
          *  appends to it. */
         val pendingReplies = linkedMapOf<String, PendingReply>()
+
+        /** The currently-connected listener instance, if any --
+         *  getActiveNotifications() is an instance method that only works
+         *  once the service is bound/connected, so VoiceSessionService
+         *  needs a handle to actually call it from outside. Cleared on
+         *  disconnect so a stale reference never gets used. */
+        @Volatile private var connectedInstance: WhatsAppNotificationListener? = null
+
+        /** Snapshot of whatever WhatsApp conversations currently have an
+         *  UNDISMISSED notification sitting in the shade right now --
+         *  this is the closest thing to "unread WhatsApp messages" any
+         *  app can get. WhatsApp has no public message database like SMS
+         *  does (content://sms has no WhatsApp equivalent), so there is
+         *  no way to retrieve a conversation's full unread backlog; this
+         *  only sees what WhatsApp's own notification included (usually
+         *  the last several messages per conversation, not all of them),
+         *  and only for notifications WhatsApp hasn't cleared yet (e.g.
+         *  already opening a chat on the phone clears its notification
+         *  and removes it from this list). [contactHint], if non-blank,
+         *  filters to conversations whose title contains it. */
+        fun queryActiveWhatsAppNotifications(contactHint: String): org.json.JSONObject {
+            val instance = connectedInstance
+                ?: return org.json.JSONObject().apply {
+                    put("error", "Notification access isn't connected right now -- check the Driving mode toggle/permission.")
+                }
+            val active = runCatching { instance.activeNotifications }.getOrNull()
+                ?: return org.json.JSONObject().apply { put("error", "Could not read active notifications.") }
+
+            val conversations = org.json.JSONArray()
+            for (sbn in active) {
+                if (sbn.packageName != WHATSAPP_PACKAGE && sbn.packageName != WHATSAPP_BUSINESS_PACKAGE) continue
+                val notification = sbn.notification ?: continue
+                val style = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(notification)
+                val title: String
+                val texts: List<String>
+                if (style != null && style.messages.isNotEmpty()) {
+                    title = style.conversationTitle?.toString()
+                        ?: style.messages.last().person?.name?.toString()
+                        ?: "WhatsApp"
+                    // ALL messages still in this notification's batch, not
+                    // just the latest -- MessagingStyle keeps a bounded
+                    // recent history (typically the last several), which is
+                    // more useful for "what did I miss" than a single line.
+                    texts = style.messages.mapNotNull { it.text?.toString() }.filter { it.isNotBlank() }
+                } else {
+                    title = notification.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
+                    val text = notification.extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
+                    texts = if (text.isNotBlank()) listOf(text) else emptyList()
+                }
+                if (title.isBlank() || texts.isEmpty()) continue
+                if (contactHint.isNotBlank() && !title.contains(contactHint, ignoreCase = true)) continue
+                conversations.put(org.json.JSONObject().apply {
+                    put("conversation", title)
+                    put("messages", org.json.JSONArray(texts))
+                })
+            }
+            return org.json.JSONObject().apply {
+                put("conversations", conversations)
+                put(
+                    "note",
+                    "This only reflects conversations with a notification WhatsApp " +
+                        "hasn't cleared yet, and only the recent messages WhatsApp " +
+                        "included in it -- not necessarily every unread message in a " +
+                        "conversation with a large unread count.",
+                )
+            }
+        }
+    }
+
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        connectedInstance = this
+    }
+
+    override fun onListenerDisconnected() {
+        super.onListenerDisconnected()
+        connectedInstance = null
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {

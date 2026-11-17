@@ -559,6 +559,11 @@ class VoiceSessionService : Service() {
                     if (call.id.isNotEmpty()) client.sendToolResponse(call.id, result)
                 }
             }
+            "query_whatsapp_unread" -> {
+                val contactHint = call.args.optString("contact_hint")
+                val result = WhatsAppNotificationListener.queryActiveWhatsAppNotifications(contactHint)
+                if (call.id.isNotEmpty()) client.sendToolResponse(call.id, result)
+            }
             else -> respond(client, call, "error", "Unknown function: ${call.name}")
         }
     }
