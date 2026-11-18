@@ -56,6 +56,20 @@ class GeminiLiveClient(
         private const val TAG = "GeminiLiveClient"
         private const val ENDPOINT =
             "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+
+        /** Restricts spoken/text replies to English or Swahili only,
+         *  matching whichever one the user last spoke in -- this is the
+         *  only reliable lever for this; the Live API's generationConfig
+         *  has no "allowed output languages" list, so it has to be a
+         *  systemInstruction. Verified against the real API: holds even
+         *  when a user explicitly asks for a reply in French. */
+        const val LANGUAGE_RESTRICTION =
+            "You must only ever respond in English or Swahili, matching " +
+                "whichever language the user most recently spoke in. If the " +
+                "user speaks in any other language, reply in English (not " +
+                "that other language) and you may note briefly that you " +
+                "only support English and Swahili. Never produce a reply in " +
+                "any language besides English or Swahili, even if asked to."
     }
 
     sealed class Event {
@@ -160,6 +174,9 @@ class GeminiLiveClient(
                 put("model", model)
                 put("generationConfig", JSONObject().apply {
                     put("responseModalities", JSONArray(listOf("AUDIO")))
+                })
+                put("systemInstruction", JSONObject().apply {
+                    put("parts", JSONArray(listOf(JSONObject().apply { put("text", LANGUAGE_RESTRICTION) })))
                 })
                 put("inputAudioTranscription", JSONObject())
                 put("outputAudioTranscription", JSONObject())
